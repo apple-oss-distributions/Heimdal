@@ -38,7 +38,10 @@ RCSID("$Id$");
 kadm5_ret_t
 kadm5_c_chpass_principal(void *server_handle,
 			 krb5_principal princ,
-			 const char *password)
+			 int keepold,
+			 const char *password,
+			 int n_ks_tuple,
+			 krb5_key_salt_tuple *ks_tuple)
 {
     kadm5_client_context *context = server_handle;
     kadm5_ret_t ret;
@@ -59,6 +62,8 @@ kadm5_c_chpass_principal(void *server_handle,
     krb5_store_int32(sp, kadm_chpass);
     krb5_store_principal(sp, princ);
     krb5_store_string(sp, password);
+    krb5_store_int32(sp, keepold); /* extension */
+    _kadm5_store_ks_tuple(sp, n_ks_tuple, ks_tuple);
     ret = _kadm5_client_send(context, sp);
     krb5_storage_free(sp);
     if (ret)
@@ -82,6 +87,7 @@ kadm5_c_chpass_principal(void *server_handle,
 kadm5_ret_t
 kadm5_c_chpass_principal_with_key(void *server_handle,
 				  krb5_principal princ,
+				  int keepold,
 				  int n_key_data,
 				  krb5_key_data *key_data)
 {
@@ -107,6 +113,7 @@ kadm5_c_chpass_principal_with_key(void *server_handle,
     krb5_store_int32(sp, n_key_data);
     for (i = 0; i < n_key_data; ++i)
 	kadm5_store_key_data (sp, &key_data[i]);
+    krb5_store_int32(sp, keepold); /* extension */
     ret = _kadm5_client_send(context, sp);
     krb5_storage_free(sp);
     if (ret)

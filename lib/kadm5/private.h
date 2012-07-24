@@ -39,9 +39,9 @@
 #include <gssapi.h>
 
 struct kadm_func {
-    kadm5_ret_t (*chpass_principal) (void *, krb5_principal, const char*);
+    kadm5_ret_t (*chpass_principal) (void *, krb5_principal, int, const char*, int, krb5_key_salt_tuple *);
     kadm5_ret_t (*create_principal) (void*, kadm5_principal_ent_t,
-				     uint32_t, const char*);
+				     uint32_t, const char*, int, krb5_key_salt_tuple *);
     kadm5_ret_t (*delete_principal) (void*, krb5_principal);
     kadm5_ret_t (*destroy) (void*);
     kadm5_ret_t (*flush) (void*);
@@ -50,11 +50,14 @@ struct kadm_func {
     kadm5_ret_t (*get_principals) (void*, const char*, char***, int*);
     kadm5_ret_t (*get_privs) (void*, uint32_t*);
     kadm5_ret_t (*modify_principal) (void*, kadm5_principal_ent_t, uint32_t);
-    kadm5_ret_t (*randkey_principal) (void*, krb5_principal,
-				      krb5_keyblock**, int*);
+    kadm5_ret_t (*randkey_principal) (void*, krb5_principal, krb5_boolean, int,
+				      krb5_key_salt_tuple*, krb5_keyblock**,
+				      int*);
     kadm5_ret_t (*rename_principal) (void*, krb5_principal, krb5_principal);
-    kadm5_ret_t (*chpass_principal_with_key) (void *, krb5_principal,
+    kadm5_ret_t (*chpass_principal_with_key) (void *, krb5_principal, int,
 					      int, krb5_key_data *);
+    kadm5_ret_t (*lock) (void *);
+    kadm5_ret_t (*unlock) (void *);
 };
 
 /* XXX should be integrated */
@@ -91,6 +94,7 @@ typedef struct kadm5_server_context {
     /* */
     kadm5_config_params config;
     HDB *db;
+    int keep_open;
     krb5_principal caller;
     unsigned acl_flags;
     kadm5_log_context log_context;
@@ -179,6 +183,12 @@ struct _kadm5_xdr_gcred {
     uint32_t proc;
     uint32_t seq_num;
     uint32_t service;
+    krb5_data handle;
+};
+
+struct _kadm5_xdr_gacred {
+    uint32_t version;
+    uint32_t auth_msg;
     krb5_data handle;
 };
 

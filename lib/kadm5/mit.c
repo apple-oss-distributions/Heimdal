@@ -171,6 +171,7 @@ collect_fragments(krb5_storage *sp, krb5_storage *msg)
 
 struct grpc_client {
     krb5_data handle;
+    krb5_data last_cred;
     gss_ctx_id_t ctx;
     krb5_storage *sp;
     uint32_t seq_num;
@@ -259,7 +260,6 @@ xdr_send_request(krb5_context context,
 	sret = krb5_storage_write(msg, out->data, out->length);
 	INSIST(sret == out->length);
     } else if (client->inprogress) {
-	ssize_t sret;
 	client->inprogress = 0;
 	sret = krb5_storage_write(msg, out->data, out->length);
 	INSIST(sret == out->length);
@@ -349,6 +349,9 @@ xdr_recv_reply(krb5_context context,
 	maj_stat = gss_verify_mic(&min_stat, client->ctx, &gin, &gout, NULL);
 	krb5_data_free(&data);
 	INSIST(maj_stat == GSS_S_COMPLETE);
+    } else {
+	krb5_data_free(&client->last_cred);
+	client->last_cred = data;
     }
     CHECK(krb5_ret_uint32(reply, &tmp)); /* SUCCESS */
     INSIST(tmp == 0);
@@ -410,7 +413,10 @@ xdr_process_request(krb5_context context,
 static kadm5_ret_t
 kadm5_mit_chpass_principal(void *server_handle,
 			   krb5_principal principal,
-			   const char *password)
+			   int keepold,
+			   const char *password,
+			   int n_ks_tuple,
+			   krb5_key_salt_tuple *ks_tuple)
 {
     kadm5_mit_context *context = server_handle;
     krb5_set_error_message(context->context, KADM5_RPC_ERROR,
@@ -421,6 +427,7 @@ kadm5_mit_chpass_principal(void *server_handle,
 static kadm5_ret_t
 kadm5_mit_chpass_principal_with_key(void *server_handle,
 				    krb5_principal princ,
+				    int keepold,
 				    int n_key_data,
 				    krb5_key_data *key_data)
 {
@@ -434,7 +441,9 @@ static kadm5_ret_t
 kadm5_mit_create_principal(void *server_handle,
 			   kadm5_principal_ent_t entry,
 			   uint32_t mask,
-			   const char *password)
+			   const char *password,
+			   int n_ks_tuple,
+			   krb5_key_salt_tuple *ks_tuple)
 {
     kadm5_mit_context *context = server_handle;
     krb5_storage *sp = NULL;
@@ -647,6 +656,9 @@ kadm5_mit_rename_principal(void *server_handle,
 static kadm5_ret_t
 kadm5_mit_randkey_principal(void *server_handle,
 			    krb5_principal principal,
+			    krb5_boolean keepold,
+			    int n_ks_tuple,
+			    krb5_key_salt_tuple *ks_tuple,
 			    krb5_keyblock **keys,
 			    int *n_keys)
 {
@@ -699,6 +711,27 @@ kadm5_mit_randkey_principal(void *server_handle,
  *
  */
 
+static void
+verify_seq_num(struct grpc_client *c, uint32_t seq, krb5_data *cred)
+{
+    OM_uint32 maj_stat, min_stat;
+    gss_buffer_desc gin, gout;
+
+    seq = htonl(seq);
+
+    gin.value = &seq;
+    gin.length = sizeof(seq);
+    gout.value = cred->data;
+    gout.length = cred->length;
+
+    INSIST(cred->length != 0);
+
+    maj_stat = gss_verify_mic(&min_stat, c->ctx, &gin, &gout, NULL);
+    krb5_data_free(&c->last_cred);
+    INSIST(maj_stat == GSS_S_COMPLETE);
+}
+
+
 static krb5_error_code
 xdr_setup_connection(krb5_context context,
 		     const char *service,
@@ -715,6 +748,7 @@ xdr_setup_connection(krb5_context context,
     gss_buffer_desc gin, gout;
     gss_name_t target;
     int try_kadmin_admin = 0;
+    uint32_t seq_window = 0;
 
     c = calloc(1, sizeof(*c));
     if (c == NULL)
@@ -776,7 +810,6 @@ xdr_setup_connection(krb5_context context,
     while (1) {
 	krb5_storage *out, *in = krb5_storage_emem();
 	krb5_data data;
-	uint32_t seq_window;
 
 	maj_stat = gss_init_sec_context(&min_stat, GSS_C_NO_CREDENTIAL,
 					&c->ctx, target, GSS_KRB5_MECHANISM,
@@ -803,8 +836,11 @@ xdr_setup_connection(krb5_context context,
 	} else {
 	    INSIST(maj_stat == GSS_S_COMPLETE);
 	    INSIST((ret_flags & GSS_C_MUTUAL_FLAG) != 0);
-	    if (c->done)
+	    if (c->done) {
+		verify_seq_num(c, seq_window, &c->last_cred);
+		krb5_data_free(&c->last_cred);
 		break;
+	    }
 
 	    c->done = 1;
 	}
@@ -831,14 +867,19 @@ xdr_setup_connection(krb5_context context,
 	gin.value = data.data;
 
 	if (GSS_ERROR(maj_stat2)) {
-
+	    krb5_data_free(&data);
+	    krb5_set_error_message(context, EINVAL,
+				   "server sent a failure code: %d/%d",
+				   maj_stat2, min_stat);
+	    return EINVAL;
 	} else if (maj_stat2 & GSS_S_CONTINUE_NEEDED) {
 	    INSIST(!c->done);
 
 	} else {
 	    INSIST(maj_stat2 == GSS_S_COMPLETE);
 	    if (c->done) {
-		INSIST(gin.length == 0);
+		verify_seq_num(c, seq_window, &c->last_cred);
+		krb5_data_free(&c->last_cred);
 		break;
 	    }
 	    c->done = 1;

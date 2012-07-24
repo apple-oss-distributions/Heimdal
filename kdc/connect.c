@@ -60,7 +60,7 @@ struct port_desc{
 /* the current ones */
 
 static struct port_desc *ports;
-static int num_ports;
+static size_t num_ports;
 
 static void
 kdc_service(void *ctx, const heim_idata *req,
@@ -79,7 +79,7 @@ add_port(krb5_context context,
 	 int family, int port, const char *protocol)
 {
     int type;
-    int i;
+    size_t i;
 
     if(strcmp(protocol, "udp") == 0)
 	type = SOCK_DGRAM;
@@ -146,7 +146,7 @@ add_port_string (krb5_context context,
  */
 
 static void
-add_standard_ports (krb5_context context, 		
+add_standard_ports (krb5_context context,
 		    krb5_kdc_configuration *config,
 		    int family)
 {
@@ -156,16 +156,6 @@ add_standard_ports (krb5_context context,
     add_port_service(context, family, "kerberos-sec", 88, "tcp");
     if(enable_http)
 	add_port_service(context, family, "http", 80, "tcp");
-    if(config->enable_524) {
-	add_port_service(context, family, "krb524", 4444, "udp");
-	add_port_service(context, family, "krb524", 4444, "tcp");
-    }
-    if(config->enable_v4) {
-	add_port_service(context, family, "kerberos-iv", 750, "udp");
-	add_port_service(context, family, "kerberos-iv", 750, "tcp");
-    }
-    if (config->enable_kaserver)
-	add_port_service(context, family, "afs3-kaserver", 7004, "udp");
     if(config->enable_kx509) {
 	add_port_service(context, family, "kca_service", 9878, "udp");
 	add_port_service(context, family, "kca_service", 9878, "tcp");
@@ -180,7 +170,7 @@ add_standard_ports (krb5_context context,
  */
 
 static void
-parse_ports(krb5_context context, 		
+parse_ports(krb5_context context,
 	    krb5_kdc_configuration *config,
 	    const char *str)
 {
@@ -212,7 +202,7 @@ parse_ports(krb5_context context,
 		add_port_string(context, AF_INET, p, "tcp");
 	    }
 	}
-	
+
 	p = strtok_r(NULL, " \t", &pos);
     }
     free (str_copy);
@@ -350,7 +340,7 @@ init_sockets(krb5_context context,
 	     struct descr **desc)
 {
     krb5_error_code ret;
-    int i, j;
+    size_t i, j;
     struct descr *d;
     int num = 0;
     krb5_addresses addresses;
@@ -410,6 +400,9 @@ init_sockets(krb5_context context,
 static krb5_context kdc_context;
 static krb5_kdc_configuration *kdc_config;
 	   
+/*
+ *
+ */
 
 static void
 kdc_service(void *ctx, const heim_idata *req,
@@ -417,18 +410,30 @@ kdc_service(void *ctx, const heim_idata *req,
 	     heim_ipc_complete complete,
 	     heim_sipc_call cctx)
 {
+    krb5_socklen_t sasize;
+    struct sockaddr *sa;
     struct descr *d = ctx;
     int datagram_reply = (d->type == SOCK_DGRAM);
     krb5_data reply;
     krb5_error_code ret;
+    char addr[NI_MAXHOST], port[NI_MAXSERV];
 
     krb5_kdc_update_time(NULL);
     krb5_data_zero(&reply);
  
+    sa = heim_ipc_cred_get_client_address(cred, &sasize);
+
+    if (sa == NULL || getnameinfo(sa, sasize, addr, sizeof(addr), port, sizeof(port), NI_NUMERICHOST|NI_NUMERICSERV) != 0)
+	strlcpy(addr, "unknown network address", sizeof(addr));
+    else {
+	strlcat(addr, ":", sizeof(addr));
+	strlcat(addr, port, sizeof(addr));
+    }
+
     ret = krb5_kdc_process_request(kdc_context, kdc_config,
 				   req->data, req->length,
 				   &reply,
-				   "network", d->sa,
+				   addr, sa,
 				   datagram_reply);
     if(request_log)
 	krb5_kdc_save_request(kdc_context, request_log,

@@ -36,7 +36,10 @@
 #include "config.h"
 
 #include <sys/types.h>
+#include <sys/socket.h>
+#ifdef HAVE_SYS_UN_H
 #include <sys/un.h>
+#endif
 
 #define __APPLE_USE_RFC_3542 1
 
@@ -50,9 +53,14 @@
 #include <string.h>
 #include <errno.h>
 
+#ifdef HAVE_GETPEERUCRED
+#include <ucred.h>
+#endif
+
 #include <krb5-types.h>
 #include <asn1-common.h>
 
+#include <heimbase.h>
 #include <base64.h>
 
 #include <heim-ipc.h>
@@ -70,6 +78,8 @@ typedef boolean_t (*dispatch_mig_callback_t)(mach_msg_header_t *message, mach_ms
 
 mach_msg_return_t
 dispatch_mig_server(dispatch_source_t ds, size_t maxmsgsz, dispatch_mig_callback_t callback);
+#else
+#include <dispatch/private.h>
 #endif
 
 #endif
@@ -81,8 +91,9 @@ int
 _heim_ipc_create_cred(uid_t, gid_t, pid_t, pid_t, heim_icred *);
 
 int
-_heim_ipc_create_network_cred(struct sockaddr *, krb5_socklen_t, heim_icred *);
-
+_heim_ipc_create_network_cred(struct sockaddr *, krb5_socklen_t,
+			      struct sockaddr *, krb5_socklen_t,
+			      heim_icred *);
 void
 _heim_ipc_suspend_timer(void);
 

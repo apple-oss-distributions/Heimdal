@@ -28,12 +28,12 @@
 
 #include "mech_locl.h"
 
-OM_uint32 GSSAPI_LIB_FUNCTION
+GSSAPI_LIB_FUNCTION OM_uint32 GSSAPI_LIB_CALL
 gss_delete_sec_context(OM_uint32 *minor_status,
     gss_ctx_id_t *context_handle,
     gss_buffer_t output_token)
 {
-	OM_uint32 major_status;
+	OM_uint32 major_status, junk;
 	struct _gss_context *ctx = (struct _gss_context *) *context_handle;
 
 	if (output_token)
@@ -43,6 +43,9 @@ gss_delete_sec_context(OM_uint32 *minor_status,
 	major_status = GSS_S_COMPLETE;
     
 	if (ctx) {
+		if (ctx->gc_replaced_cred)
+			gss_release_cred(&junk, &ctx->gc_replaced_cred);
+
 		/*
 		 * If we have an implementation ctx, delete it,
 		 * otherwise fake an empty token.

@@ -125,7 +125,7 @@ srv_find_realm(krb5_context context, krb5_krbhst_info ***res, int *count,
 	    (*res)[num_srv++] = hi;
 
 	    hi->proto = proto_num;
-	
+
 	    hi->def_port = def_port;
 	    if (port != 0)
 		hi->port = port;
@@ -136,7 +136,7 @@ srv_find_realm(krb5_context context, krb5_krbhst_info ***res, int *count,
 	}
 
     *count = num_srv;
-	
+
     rk_dns_free_data(r);
     return 0;
 }
@@ -367,28 +367,66 @@ make_hints(struct addrinfo *hints, int proto)
     }
 }
 
-/*
- * return an `struct addrinfo *' in `ai' corresponding to the information
- * in `host'.  free:ing is handled by krb5_krbhst_free.
+/**
+ * Return an `struct addrinfo *' for a KDC host.
+ *
+ * Returns an the struct addrinfo in in that corresponds to the
+ * information in `host'.  free:ing is handled by krb5_krbhst_free, so
+ * the returned ai must not be released.
+ *
+ * @ingroup krb5
  */
 
 KRB5_LIB_FUNCTION krb5_error_code KRB5_LIB_CALL
 krb5_krbhst_get_addrinfo(krb5_context context, krb5_krbhst_info *host,
 			 struct addrinfo **ai)
 {
-    struct addrinfo hints;
-    char portstr[NI_MAXSERV];
-    int ret;
+    int ret = 0;
 
     if (host->ai == NULL) {
-	make_hints(&hints, host->proto);
+	struct addrinfo hints;
+	char portstr[NI_MAXSERV];
+	char *hostname = host->hostname;
+
 	snprintf (portstr, sizeof(portstr), "%d", host->port);
+	make_hints(&hints, host->proto);
+
+	/**
+	 * First try this as an IP address, this allows us to add a
+	 * dot at the end to stop using the search domains.
+	 */
+
+	hints.ai_flags |= AI_NUMERICHOST | AI_NUMERICSERV;
+
 	ret = getaddrinfo(host->hostname, portstr, &hints, &host->ai);
-	if (ret)
-	    return krb5_eai_to_heim_errno(ret, errno);
+	if (ret == 0)
+	    goto out;
+
+	/**
+	 * If the hostname contains a dot, assumes it's a FQDN and
+	 * don't use search domains since that might be painfully slow
+	 * when machine is disconnected from that network.
+	 */
+
+	hints.ai_flags &= ~(AI_NUMERICHOST);
+
+	if (strchr(hostname, '.') && hostname[strlen(hostname) - 1] != '.') {
+	    ret = asprintf(&hostname, "%s.", host->hostname);
+	    if (ret < 0 || hostname == NULL)
+		return ENOMEM;
+	}
+
+	ret = getaddrinfo(hostname, portstr, &hints, &host->ai);
+	if (hostname != host->hostname)
+	    free(hostname);
+	if (ret) {
+	    ret = krb5_eai_to_heim_errno(ret, errno);
+	    goto out;
+	}
     }
+ out:
     *ai = host->ai;
-    return 0;
+    return ret;
 }
 
 static krb5_boolean
@@ -493,7 +531,7 @@ fallback_get_hosts(krb5_context context, struct krb5_krbhst_data *kd,
 	ret = asprintf(&host, "%s.%s.", serv_string, kd->realm);
     else
 	ret = asprintf(&host, "%s-%d.%s.",
-		       serv_string, kd->fallback_count, kd->realm);	
+		       serv_string, kd->fallback_count, kd->realm);
 
     if (ret < 0 || host == NULL)
 	return ENOMEM;
@@ -532,17 +570,49 @@ fallback_get_hosts(krb5_context context, struct krb5_krbhst_data *kd,
  */
 
 static krb5_error_code
-add_locate(void *ctx, int type, struct sockaddr *addr)
+add_plugin_host(struct krb5_krbhst_data *kd,
+		const char *host,
+		const char *port,
+		int portnum,
+		int proto)
 {
     struct krb5_krbhst_info *hi;
-    struct krb5_krbhst_data *kd = ctx;
-    char host[NI_MAXHOST], port[NI_MAXSERV];
     struct addrinfo hints, *ai;
-    socklen_t socklen;
     size_t hostlen;
     int ret;
 
+    make_hints(&hints, proto);
+    ret = getaddrinfo(host, port, &hints, &ai);
+    if (ret)
+	return 0;
+
+    hostlen = strlen(host);
+
+    hi = calloc(1, sizeof(*hi) + hostlen);
+    if(hi == NULL)
+	return ENOMEM;
+
+    hi->proto = proto;
+    hi->port  = hi->def_port = portnum;
+    hi->ai    = ai;
+    memmove(hi->hostname, host, hostlen);
+    hi->hostname[hostlen] = '\0';
+    append_host_hostinfo(kd, hi);
+
+    return 0;
+}
+
+static krb5_error_code
+add_locate(void *ctx, int type, struct sockaddr *addr)
+{
+    struct krb5_krbhst_data *kd = ctx;
+    char host[NI_MAXHOST], port[NI_MAXSERV];
+    socklen_t socklen;
+    krb5_error_code ret;
+    int proto, portnum;
+
     socklen = socket_sockaddr_size(addr);
+    portnum = socket_get_port(addr);
 
     ret = getnameinfo(addr, socklen, host, sizeof(host), port, sizeof(port),
 		      NI_NUMERICHOST|NI_NUMERICSERV);
@@ -554,23 +624,25 @@ add_locate(void *ctx, int type, struct sockaddr *addr)
     else if (atoi(port) == 0)
 	snprintf(port, sizeof(port), "%d", krbhst_get_default_port(kd));
 
-    make_hints(&hints, krbhst_get_default_proto(kd));
-    ret = getaddrinfo(host, port, &hints, &ai);
+    proto = krbhst_get_default_proto(kd);
+
+    ret = add_plugin_host(kd, host, port, portnum, proto);
     if (ret)
-	return 0;
+	return ret;
 
-    hostlen = strlen(host);
+    /*
+     * This is really kind of broken and should be solved a different
+     * way, some sites block UDP, and we don't, in the general case,
+     * fall back to TCP, that should also be done. But since that
+     * should require us to invert the whole "find kdc" stack, let put
+     * this in for now. 
+     */
 
-    hi = calloc(1, sizeof(*hi) + hostlen);
-    if(hi == NULL)
-	return ENOMEM;
-
-    hi->proto = krbhst_get_default_proto(kd);
-    hi->port  = hi->def_port = socket_get_port(addr);
-    hi->ai    = ai;
-    memmove(hi->hostname, host, hostlen);
-    hi->hostname[hostlen] = '\0';
-    append_host_hostinfo(kd, hi);
+    if (proto == KRB5_KRBHST_UDP) {
+	ret = add_plugin_host(kd, host, port, portnum, KRB5_KRBHST_TCP);
+	if (ret)
+	    return ret;
+    }
 
     return 0;
 }
@@ -607,9 +679,9 @@ plugin_get_hosts(krb5_context context,
     if (krb5_homedir_access(context))
 	ctx.flags |= KRB5_PLF_ALLOW_HOMEDIR;
 
-    _krb5_plugin_run_f(context, "krb5", KRB5_PLUGIN_LOCATE,
-		       KRB5_PLUGIN_LOCATE_VERSION_0,
-		       0, &ctx, plcallback);
+    krb5_plugin_run_f(context, "krb5", KRB5_PLUGIN_LOCATE,
+		      KRB5_PLUGIN_LOCATE_VERSION_0,
+		      0, &ctx, plcallback);
 }
 
 /*

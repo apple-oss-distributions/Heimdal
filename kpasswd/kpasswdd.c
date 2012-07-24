@@ -49,8 +49,6 @@ krb5_addresses explicit_addresses;
 
 static krb5_keytab global_keytab = NULL;
 
-static sig_atomic_t exit_flag = 0;
-
 static void
 add_one_address (const char *str, int first)
 {
@@ -246,7 +244,7 @@ change(krb5_auth_context auth_context,
 			"malformed ChangePasswdData", out_data);
 	    return;
 	}
-	
+
 
 	ret = krb5_copy_data(context, &chpw.newpasswd, &pwd_data);
 	if (ret) {
@@ -366,7 +364,7 @@ change(krb5_auth_context auth_context,
     tmp = pwd_data->data;
     tmp[pwd_data->length - 1] = '\0';
 
-    ret = kadm5_s_chpass_principal_cond (kadm5_handle, principal, tmp);
+    ret = kadm5_s_chpass_principal_cond (kadm5_handle, principal, 1, tmp, 0, NULL);
     krb5_free_data (context, pwd_data);
     pwd_data = NULL;
     if (ret) {
@@ -526,9 +524,10 @@ out:
 
 static krb5_error_code
 process(int s,
-	krb5_address *this_addr,
-	struct sockaddr *sa,
-	int sa_size,
+	struct sockaddr *server,
+	int server_size,
+	struct sockaddr *client,
+	int client_size,
 	u_char *msg,
 	int len,
 	heim_idata *out_data)
@@ -537,10 +536,31 @@ process(int s,
     krb5_auth_context auth_context = NULL;
     krb5_ticket *ticket;
     uint16_t version;
-    krb5_realm *realms;
+    krb5_realm *realms = NULL;
     krb5_data clear_data;
+    krb5_address client_addr, server_addr;
 
     krb5_data_zero(&clear_data);
+    memset(&client_addr, 0, sizeof(client_addr));
+    memset(&server_addr, 0, sizeof(server_addr));
+
+    ret = krb5_sockaddr2address(context, client, &client_addr);
+    if (ret) {
+	krb5_warn(context, ret, "krb5_sockaddr2address");
+	goto out;
+    }
+    ret = krb5_sockaddr2address(context, server, &server_addr);
+    if (ret) {
+	krb5_warn(context, ret, "krb5_sockaddr2address");
+	goto out;
+    }
+
+    {
+	char cstr[200];
+	size_t ss;
+	krb5_print_address(&client_addr, cstr, sizeof(cstr), &ss);
+	krb5_warnx(context, "request from client: %s", cstr);
+    }
 
     ret = krb5_get_default_realms(context, &realms);
     if (ret) {
@@ -558,21 +578,12 @@ process(int s,
 			   KRB5_AUTH_CONTEXT_DO_SEQUENCE);
 
     if (verify(&auth_context, realms, global_keytab, &ticket,
-	       &version, s, sa, sa_size, msg, len, &clear_data) == 0)
+	       &version, s, client, client_size, msg, len, &clear_data) == 0)
     {
-	krb5_address other_addr;
-
-	ret = krb5_sockaddr2address (context, sa, &other_addr);
-	if (ret) {
-	    krb5_warn(context, ret, "krb5_sockaddr2address");
-	    goto out;
-	}
-
 	ret = krb5_auth_con_setaddrs(context,
 				     auth_context,
-				     this_addr,
-				     &other_addr);
-	krb5_free_address(context, &other_addr);
+				     &server_addr,
+				     &client_addr);
 	if (ret) {
 	    krb5_warn(context, ret, "krb5_sockaddr2address");
 	    goto out;
@@ -585,24 +596,35 @@ process(int s,
     }
 
 out:
+    krb5_free_address(context, &client_addr);
+    krb5_free_address(context, &server_addr);
     if (clear_data.data)
 	memset(clear_data.data, 0, clear_data.length);
     krb5_data_free(&clear_data);
 
     krb5_auth_con_free(context, auth_context);
-    krb5_free_host_realm(context, realms);
+    if (realms)
+	krb5_free_host_realm(context, realms);
     return ret;
 }
 
 struct data {
     rk_socket_t s;
-    krb5_address addr;
     struct sockaddr *sa;
     struct sockaddr_storage __ss;
     krb5_socklen_t sa_size;
     heim_sipc service;
+    struct data *next;
 };
 
+/*
+ * Linked list to not leak memory
+ */
+static struct data *head_data = NULL;
+
+/*
+ *
+ */
 
 static void
 passwd_service(void *ctx, const heim_idata *req,
@@ -613,18 +635,20 @@ passwd_service(void *ctx, const heim_idata *req,
     struct data *data = ctx;
     heim_idata out_data;
     krb5_error_code ret;
-    struct sockaddr *sa;
-    krb5_socklen_t sa_size;
+    struct sockaddr *client, *server;
+    krb5_socklen_t client_size, server_size;
     
-    sa = heim_ipc_cred_get_address(cred, &sa_size);
-    if (sa == NULL)
-	abort();
+    client = heim_ipc_cred_get_client_address(cred, &client_size);
+    heim_assert(client != NULL, "no address from client");
     
+    server = heim_ipc_cred_get_server_address(cred, &server_size);
+    heim_assert(server != NULL, "no address from server");
+
     krb5_data_zero(&out_data);
 
     ret = process(data->s,
-		  &data->addr,
-		  sa, sa_size,
+		  server, server_size,
+		  client, client_size,
 		  req->data, req->length, &out_data);
 
     complete(cctx, ret, &out_data);
@@ -636,7 +660,7 @@ passwd_service(void *ctx, const heim_idata *req,
 
 
 static void
-listen_on(krb5_context context, krb5_address *addr, int type, int port)
+listen_on(krb5_address *addr, int type, int port)
 {
     krb5_error_code ret;
     struct data *data;
@@ -649,22 +673,22 @@ listen_on(krb5_context context, krb5_address *addr, int type, int port)
     data->sa_size = sizeof(data->__ss);
 
     krb5_addr2sockaddr(context, addr, data->sa, &data->sa_size, port);
-	
-    ret = krb5_copy_address(context, addr, &data->addr);
-    if (ret) {
-	free(data);
-	return;
-    }
 
     data->s = socket(data->sa->sa_family, type, 0);
     if (data->s < 0) {
 	krb5_warn(context, errno, "socket");
-	krb5_free_address(context, &data->addr);
 	free(data);
 	return;
     }
 
+    socket_set_reuseaddr(data->s, 1);
+#ifdef HAVE_IPV6
+    if (data->sa->sa_family == AF_INET6)
+	socket_set_ipv6only(data->s, 1);
+#endif
+
     socket_set_ipv6only(data->s, 1);
+    socket_set_reuseaddr(data->s, 1);
 
     if (bind(data->s, data->sa, data->sa_size) < 0) {
 	char str[128];
@@ -676,7 +700,6 @@ listen_on(krb5_context context, krb5_address *addr, int type, int port)
 	    strlcpy(str, "unknown address", sizeof(str));
 	krb5_warn (context, save_errno, "bind(%s/%d)", str, ntohs(port));
 	rk_closesocket(data->s);
-	krb5_free_address(context, &data->addr);
 	free(data);
 	return;
     }
@@ -688,7 +711,6 @@ listen_on(krb5_context context, krb5_address *addr, int type, int port)
 	    
 	    krb5_print_address(addr, a_str, sizeof(a_str), &len);
 	    krb5_warn(context, errno, "listen %s/%d", a_str, ntohs(port));
-	    krb5_free_address(context, &data->addr);
 	    rk_closesocket(data->s);
 	    free(data);
 	    return;
@@ -705,6 +727,9 @@ listen_on(krb5_context context, krb5_address *addr, int type, int port)
 	if (ret)
 	    errx(1, "heim_sipc_service_dgram: %d", ret);
     }
+
+    data->next = head_data;
+    head_data = data;
 }
 
 static int
@@ -727,8 +752,8 @@ doit(int port)
     }
 
     for (i = 0; i < addrs.len; ++i) {
-	listen_on(context, &addrs.val[i], SOCK_STREAM, port);
-	listen_on(context, &addrs.val[i], SOCK_DGRAM, port);
+	listen_on(&addrs.val[i], SOCK_STREAM, port);
+	listen_on(&addrs.val[i], SOCK_DGRAM, port);
     }	
 
     heim_ipc_main();
@@ -738,16 +763,17 @@ doit(int port)
     return 0;
 }
 
-static RETSIGTYPE
-sigterm(int sig)
+static void
+terminated(void *ctx)
 {
-    exit_flag = 1;
+    exit(1);
 }
 
 static const char *check_library  = NULL;
 static const char *check_function = NULL;
 static getarg_strings policy_libraries = { 0, NULL };
-static char *keytab_str = "HDB:";
+static char sHDB[] = "HDB:";
+static char *keytab_str = sHDB;
 static char *realm_str;
 static int version_flag;
 static int help_flag;
@@ -767,11 +793,11 @@ struct getargs args[] = {
       "addresses to listen on", "list of addresses" },
     { "keytab", 'k', arg_string, &keytab_str,
       "keytab to get authentication key from", "kspec" },
-    { "config-file", 'c', arg_string, &config_file },
+    { "config-file", 'c', arg_string, &config_file, NULL, NULL },
     { "realm", 'r', arg_string, &realm_str, "default realm", "realm" },
-    { "port",  'p', arg_string, &port_str, "port" },
-    { "version", 0, arg_flag, &version_flag },
-    { "help", 0, arg_flag, &help_flag }
+    { "port",  'p', arg_string, &port_str, "port", NULL },
+    { "version", 0, arg_flag, &version_flag, NULL, NULL },
+    { "help", 0, arg_flag, &help_flag, NULL, NULL }
 };
 int num_args = sizeof(args) / sizeof(args[0]);
 
@@ -866,10 +892,10 @@ main (int argc, char **argv)
     explicit_addresses.len = 0;
 
     if (addresses_str.num_strings) {
-	int i;
+	int j;
 
-	for (i = 0; i < addresses_str.num_strings; ++i)
-	    add_one_address (addresses_str.strings[i], i == 0);
+	for (j = 0; j < addresses_str.num_strings; ++j)
+	    add_one_address (addresses_str.strings[j], j == 0);
 	free_getarg_strings (&addresses_str);
     } else {
 	char **foo = krb5_config_get_strings (context, NULL,
@@ -882,21 +908,8 @@ main (int argc, char **argv)
 	}
     }
 
-#ifdef HAVE_SIGACTION
-    {
-	struct sigaction sa;
-
-	sa.sa_flags = 0;
-	sa.sa_handler = sigterm;
-	sigemptyset(&sa.sa_mask);
-
-	sigaction(SIGINT,  &sa, NULL);
-	sigaction(SIGTERM, &sa, NULL);
-    }
-#else
-    signal(SIGINT,  sigterm);
-    signal(SIGTERM, sigterm);
-#endif
+    heim_sipc_signal_handler(SIGINT, terminated, "SIGINT");
+    heim_sipc_signal_handler(SIGTERM, terminated, "SIGTERM");
 
     pidfile(NULL);
 

@@ -146,19 +146,41 @@ map_service(krb5_context context, krb5_const_principal principal, krb5_principal
     return 0;
 }
 
+static bool
+tryAgainP(krb5_context context, int *tryAgain, CFErrorRef *error)
+{
+    if (*tryAgain <= 1)
+	return 0;
+
+    if (error && *error) {
+	CFRelease(*error);
+	*error = NULL;
+    }
+    (*tryAgain)--;
+
+    krb5_warnx(context, "try fetching result again");
+
+    return 1;
+}
+
+#define MAX_TRIES	3
+
+
 /*
  * Returns the matching User or Computer record, if not, returns the node itself
  */
 
 static ODRecordRef
-HODODNodeCopyLinkageRecordFromAuthenticationData(ODNodeRef node, ODRecordRef record, CFErrorRef *error)
+HODODNodeCopyLinkageRecordFromAuthenticationData(krb5_context context, ODNodeRef node, ODRecordRef record)
 {
     CFMutableArrayRef types = NULL;
-    CFArrayRef array = NULL;
+    CFArrayRef linkageArray = NULL, resultArray = NULL;
     CFTypeRef userLinkage;
     ODQueryRef query = NULL;
+    CFErrorRef error = NULL;
     ODRecordRef res;
-    
+    int tryAgain = MAX_TRIES;
+
     types = CFArrayCreateMutable(NULL, 2, &kCFTypeArrayCallBacks);
     if (types == NULL)
 	goto out;
@@ -166,44 +188,50 @@ HODODNodeCopyLinkageRecordFromAuthenticationData(ODNodeRef node, ODRecordRef rec
     CFArrayAppendValue(types, kODRecordTypeUsers);
     CFArrayAppendValue(types, kODRecordTypeComputers);
     
-    array = ODRecordCopyValues(record, CFSTR("dsAttrTypeNative:userLinkage"), error);
-    if (array == NULL)
+    linkageArray = ODRecordCopyValues(record, CFSTR("dsAttrTypeNative:userLinkage"), &error);
+    if (linkageArray == NULL)
 	goto out;
 
-    if (CFArrayGetCount(array) == 0)
+    if (CFArrayGetCount(linkageArray) == 0)
 	goto out;
 
-    userLinkage = CFArrayGetValueAtIndex(array, 0);
+    userLinkage = CFArrayGetValueAtIndex(linkageArray, 0);
     if (userLinkage == NULL)
 	goto out;
     
-    query = ODQueryCreateWithNode(NULL, node, types,
-				  CFSTR("dsAttrTypeNative:entryUUID"),
-				  kODMatchEqualTo,
-				  userLinkage, NULL, 1, error);
-    if (query == NULL)
-        goto out;
+    do {
+	query = ODQueryCreateWithNode(NULL, node, types,
+				      CFSTR("dsAttrTypeNative:entryUUID"),
+				      kODMatchEqualTo,
+				      userLinkage, NULL, 1, &error);
+	if (query == NULL)
+	    goto out;
 
-    CFRelease(array);
-    array = ODQueryCopyResults(query, FALSE, error);
-    if (array == NULL)
+	resultArray = ODQueryCopyResults(query, FALSE, &error);
+        CFRelease(query);
+	if (resultArray == NULL && error == NULL)
+	    tryAgain = 0;
+    } while(resultArray == NULL && tryAgainP(context, &tryAgain, &error));
+    if (resultArray == NULL)
 	goto out;
 
-    if (CFArrayGetCount(array) == 0)
+    if (CFArrayGetCount(resultArray) == 0)
 	goto out;
 
-    res = (ODRecordRef)CFArrayGetValueAtIndex(array, 0);
+    res = (ODRecordRef)CFArrayGetValueAtIndex(resultArray, 0);
     if (res)
 	record = res;
 
 out:
     CFRetain(record);
+    if (error)
+	CFRelease(error);
+    if (linkageArray)
+	CFRelease(linkageArray);
+    if (resultArray)
+	CFRelease(resultArray);
     if (types)
 	CFRelease(types);
-    if (array)
-	CFRelease(array);
-    if (query)
-        CFRelease(query);
     return record;
 	
 }
@@ -227,12 +255,12 @@ od2hdb_usercert(krb5_context context, hdb_od d,
 
     for (i = 0; i < CFArrayGetCount(data); i++) {
 	CFDataRef c = (CFDataRef) CFArrayGetValueAtIndex(data, i);
-	krb5_data d;
+	krb5_data cd;
 
 	if (CFGetTypeID((CFTypeRef)c) != CFDataGetTypeID())
 	    continue;
 
-	ret = krb5_data_copy(&d, CFDataGetBytePtr(c),
+	ret = krb5_data_copy(&cd, CFDataGetBytePtr(c),
 			     CFDataGetLength(c));
 	if (ret) {
 	    free_HDB_extension(&ext);
@@ -244,6 +272,7 @@ od2hdb_usercert(krb5_context context, hdb_od d,
 	ptr = realloc(ext.data.u.pkinit_cert.val,
 		      sizeof(ext.data.u.pkinit_cert.val[0]) * ext.data.u.pkinit_cert.len);
 	if (ptr == NULL) {
+	    krb5_data_free(&cd);
 	    free_HDB_extension(&ext);
 	    return ENOMEM;
 	}
@@ -252,7 +281,7 @@ od2hdb_usercert(krb5_context context, hdb_od d,
 	memset(&ext.data.u.pkinit_cert.val[ext.data.u.pkinit_cert.len - 1],
 	       0, sizeof(ext.data.u.pkinit_cert.val[0]));
 
-	ext.data.u.pkinit_cert.val[ext.data.u.pkinit_cert.len - 1].cert = d;
+	ext.data.u.pkinit_cert.val[ext.data.u.pkinit_cert.len - 1].cert = cd;
     }
 
     ret = hdb_replace_extension(context, &entry->entry, &ext);
@@ -265,11 +294,12 @@ od2hdb_usercert(krb5_context context, hdb_od d,
  *
  */
 
-static ODNodeRef
-nodeCreateWithName(hdb_od d)
+static krb5_error_code
+nodeCreateWithName(krb5_context context, hdb_od d, ODNodeRef *node)
 {
     ODSessionRef session = kODSessionDefault;
-    ODNodeRef n;
+
+    *node = NULL;
 
 #ifdef __APPLE_PRIVATE__
     if (d->restoreRoot) {
@@ -279,23 +309,41 @@ nodeCreateWithName(hdb_od d)
 					    &kCFTypeDictionaryKeyCallBacks,
 					    &kCFTypeDictionaryValueCallBacks);
 	if (options == NULL)
-	    return NULL;
+	    return ENOMEM;
 
 	CFDictionaryAddValue(options, kODSessionLocalPath, d->restoreRoot);
 
 	session = ODSessionCreate(kCFAllocatorDefault, options, NULL);
 	CFRelease(options);
+	if (session == NULL) {
+	    krb5_set_error_message(context, HDB_ERR_DB_INUSE, "failed to create session");
+	    return HDB_ERR_DB_INUSE;
+	}
     }
 #endif
 
-    n = ODNodeCreateWithName(kCFAllocatorDefault,
-			     session,
-			     d->rootName,
-			     NULL);
+    *node = ODNodeCreateWithName(kCFAllocatorDefault,
+				 session,
+				 d->rootName,
+				 NULL);
     if (session)
 	CFRelease(session);
 
-    return n;
+    if (*node == NULL) {
+	char *restoreRoot = NULL, *path = NULL;
+
+	if (d->restoreRoot)
+	    restoreRoot = rk_cfstring2cstring(d->restoreRoot);
+	path = rk_cfstring2cstring(d->rootName);
+	krb5_set_error_message(context, HDB_ERR_DB_INUSE, "failed to create root node: %s %s",
+			       path ? path : "<nopath>",
+			       restoreRoot ? restoreRoot : "");
+	free(restoreRoot);
+	free(path);
+	return HDB_ERR_DB_INUSE;
+    }
+
+    return 0;
 }
 
 
@@ -529,7 +577,7 @@ od2hdb_keys(krb5_context context, hdb_od d,
 {
     CFIndex i, count = CFArrayGetCount(akeys);
     krb5_error_code ret;
-    hdb_keyset *keys;
+    hdb_keyset_aapl *keys;
     int specific_match = -1, general_match = -1;
     uint32_t specific_kvno = 0, general_kvno = 0;
 
@@ -583,7 +631,7 @@ od2hdb_keys(krb5_context context, hdb_od d,
 	    goto out;
 	}
 
-	ret = decode_hdb_keyset(ptr, ret, &keys[i], NULL);
+	ret = decode_hdb_keyset_aapl(ptr, ret, &keys[i], NULL);
 	free(ptr);
 	if (ret)
 	    goto out;
@@ -629,7 +677,7 @@ od2hdb_keys(krb5_context context, hdb_od d,
 
  out:
     for (i = 0; i < count; i++)
-	free_hdb_keyset(&keys[i]);
+	free_hdb_keyset_aapl(&keys[i]);
     free(keys);
 
     return ret;
@@ -643,7 +691,7 @@ hdb2od_keys(krb5_context context, hdb_od d, ODAttributeType type,
     heim_octet_string data;
     krb5_error_code ret;
     CFDataRef element;
-    hdb_keyset key;
+    hdb_keyset_aapl key;
     size_t size;
     
     /* if this is a change password operation, the keys have already been updated with ->hdb_password */
@@ -664,7 +712,7 @@ hdb2od_keys(krb5_context context, hdb_od d, ODAttributeType type,
 	goto out;
     }
 
-    ASN1_MALLOC_ENCODE(hdb_keyset, data.data, data.length, &key, &size, ret);
+    ASN1_MALLOC_ENCODE(hdb_keyset_aapl, data.data, data.length, &key, &size, ret);
     if (ret)
 	goto out;
     if (data.length != size)
@@ -977,6 +1025,12 @@ timePolicy(CFDictionaryRef policy, CFStringRef key)
 static krb5_error_code
 apply_policy(hdb_entry *entry, CFDictionaryRef policy)
 {
+    /*
+     * Historically, we have not applied any policies to admin users.
+     */
+    if (booleanPolicy(policy, CFSTR("isAdminUser")))
+	return 0;
+
     entry->flags.invalid = booleanPolicy(policy, CFSTR("isDisabled"));
     
     if (booleanPolicy(policy, CFSTR("newPasswordRequired"))) {
@@ -1122,7 +1176,7 @@ od_record2entry(krb5_context context, HDB * db, ODRecordRef cfRecord,
     if ((flags & HDB_F_GET_KRBTGT) == 0 && !krb5_principal_is_krbtgt(context, entry->entry.principal)) {
         ODRecordRef userrecord;
 	
-	userrecord = HODODNodeCopyLinkageRecordFromAuthenticationData(d->rootNode, cfRecord, NULL);
+	userrecord = HODODNodeCopyLinkageRecordFromAuthenticationData(context, d->rootNode, cfRecord);
 	if (userrecord) {
 	    CFDictionaryRef policy;
 	    
@@ -1224,9 +1278,9 @@ hod_firstkey(krb5_context context, HDB *db,
 	     unsigned flags, hdb_entry_ex *entry)
 {
     int ret = 0;
-    CFErrorRef error = noErr;
     ODQueryRef query = NULL;
     hdb_od d = (hdb_od)db->hdb_db;
+    int tryAgain = MAX_TRIES;
 
     if (d->LKDCRealm == NULL) {
 	krb5_set_error_message(context, EINVAL, "iteration over database only supported for DSLocal");
@@ -1235,20 +1289,28 @@ hod_firstkey(krb5_context context, HDB *db,
 
     heim_assert(d->iter.odRecordArray == NULL, "hdb: more then one iteration at the same time");
 
-    query = ODQueryCreateWithNode(NULL, d->rootNode,
-				  kODRecordTypeUsers, NULL,
-				  kODMatchAny,
-				  NULL,
-				  kODAttributeTypeAllAttributes,
-				  0,
-				  &error);
-    if (query == NULL) {
-	ret = HDB_ERR_NOENTRY;
-	goto out;
-    }
+    do {
+	CFErrorRef error = NULL;
 
-    d->iter.odRecordArray = ODQueryCopyResults(query, FALSE, NULL);
-    CFRelease(query);
+	query = ODQueryCreateWithNode(NULL, d->rootNode,
+				      kODRecordTypeUsers, NULL,
+				      kODMatchAny,
+				      NULL,
+				      kODAttributeTypeAllAttributes,
+				      0,
+				      &error);
+	if (query == NULL) {
+	    ret = HDB_ERR_NOENTRY;
+	    goto out;
+	}
+
+	d->iter.odRecordArray = ODQueryCopyResults(query, FALSE, &error);
+	CFRelease(query);
+	if (d->iter.odRecordArray == NULL && error == NULL)
+	    tryAgain = 0;
+	if (error)
+	    CFRelease(error);
+    } while(d->iter.odRecordArray == NULL && tryAgainP(context, &tryAgain, NULL));
 
     if (d->iter.odRecordArray == NULL) {
 	ret = HDB_ERR_NOENTRY;
@@ -1266,11 +1328,9 @@ hod_open(krb5_context context, HDB * db, int flags, mode_t mode)
 {
     hdb_od d = (hdb_od)db->hdb_db;
 
-    if (d->rootNode == NULL) {
-	d->rootNode = nodeCreateWithName(d);
-	if (d->rootNode == NULL)
-	    return HDB_ERR_DB_INUSE;
-    }
+    if (d->rootNode == NULL)
+	return nodeCreateWithName(context, d, &d->rootNode);
+
     return 0;
 }
 
@@ -1290,6 +1350,7 @@ lkdc_locate_record(krb5_context context, hdb_od d, krb5_principal principal,
     const char *node = NULL;
     CFTypeRef rtype = NULL;
     int upflags = 0;
+    int tryAgain = MAX_TRIES;
 
     *result = NULL;
 
@@ -1338,7 +1399,7 @@ lkdc_locate_record(krb5_context context, hdb_od d, krb5_principal principal,
 	    return HDB_ERR_NOENTRY;
 	}
 
-	n.element = choice_GeneralName_directoryName_rdnSequence;
+	n.element = choice_Name_rdnSequence;
 	n.u.rdnSequence.len = gn.u.directoryName.u.rdnSequence.len;
 	n.u.rdnSequence.val = gn.u.directoryName.u.rdnSequence.val;
 
@@ -1492,20 +1553,30 @@ lkdc_locate_record(krb5_context context, hdb_od d, krb5_principal principal,
 	goto out;
     }
 
-    query = ODQueryCreateWithNode(NULL, d->rootNode,
-				  rtype, attr,
-				  matchtype,
-				  queryString,
-				  d->inNodeAttributes,
-				  1,
-				  NULL);
-    CFRelease(queryString);
-    if (query == NULL) {
-	ret = ENOMEM;
-	goto out;
-    }
+    do {
+	CFErrorRef error = NULL;
 
-    res = ODQueryCopyResults(query, FALSE, NULL);
+	query = ODQueryCreateWithNode(NULL, d->rootNode,
+				      rtype, attr,
+				      matchtype,
+				      queryString,
+				      d->inNodeAttributes,
+				      1,
+				      NULL);
+	if (query == NULL) {
+	    CFRelease(queryString);
+	    ret = ENOMEM;
+	    goto out;
+	}
+	
+	res = ODQueryCopyResults(query, FALSE, &error);
+	if (res == NULL && error == NULL)
+	    tryAgain = 0;
+	if (error)
+	    CFRelease(error);
+    } while(res == NULL && tryAgainP(context, &tryAgain, NULL));
+
+    CFRelease(queryString);
     if (res == NULL) {
 	ret = HDB_ERR_NOENTRY;
 	goto out;
@@ -1580,6 +1651,7 @@ server_locate_record(krb5_context context, hdb_od d, krb5_principal principal,
     CFStringRef attr;
     char *kuser = NULL;
     CFStringRef client_key, server_key;
+    int tryAgain = MAX_TRIES;
 
     *result = NULL;
     
@@ -1610,21 +1682,31 @@ server_locate_record(krb5_context context, hdb_od d, krb5_principal principal,
 	goto out;
     }
     
-    query = ODQueryCreateWithNode(NULL, d->rootNode,
-				  kODRecordTypeUserAuthenticationData,
-				  attr,
-				  matchtype,
-				  queryString,
-				  d->inNodeAttributes,
-				  2,
-				  NULL);
-    CFRelease(queryString);
-    if (query == NULL) {
-	ret = ENOMEM;
-	goto out;
-    }
+    do {
+	CFErrorRef error = NULL;
+
+	query = ODQueryCreateWithNode(NULL, d->rootNode,
+				      kODRecordTypeUserAuthenticationData,
+				      attr,
+				      matchtype,
+				      queryString,
+				      d->inNodeAttributes,
+				      2,
+				      NULL);
+	if (query == NULL) {
+	    CFRelease(queryString);
+	    ret = ENOMEM;
+	    goto out;
+	}
     
-    res = ODQueryCopyResults(query, FALSE, NULL);
+	res = ODQueryCopyResults(query, FALSE, &error);
+	if (res == NULL && error == NULL)
+	    tryAgain = 0;
+	if (error)
+	    CFRelease(error);
+    } while(res == NULL && tryAgainP(context, &tryAgain, NULL));
+    CFRelease(queryString);
+
     if (res == NULL) {
 	ret = HDB_ERR_NOENTRY;
 	goto out;
@@ -1701,7 +1783,7 @@ out:
 
 static krb5_error_code
 hod_lkdc_fetch(krb5_context context, HDB * db, krb5_const_principal principal,
-	       unsigned flags, hdb_entry_ex * entry)
+	       unsigned flags, krb5_kvno kvno, hdb_entry_ex * entry)
 {
     krb5_principal eprincipal = NULL;
     hdb_od d = (hdb_od)db->hdb_db;
@@ -1762,7 +1844,7 @@ hod_lkdc_fetch(krb5_context context, HDB * db, krb5_const_principal principal,
 
 static krb5_error_code
 hod_server_fetch(krb5_context context, HDB * db, krb5_const_principal principal,
-		 unsigned flags, hdb_entry_ex * entry)
+		 unsigned flags, krb5_kvno kvno, hdb_entry_ex * entry)
 {
     krb5_principal eprincipal = NULL;
     hdb_od d = (hdb_od)db->hdb_db;
@@ -1966,9 +2048,9 @@ ntlm_notification(hdb_od d)
 	return;
 
     CFTypeRef key[] = {CFSTR("com.apple.smb")};
-    CFArrayRef keys = CFArrayCreate(kCFAllocatorDefault, key, 1, NULL);
-    SCDynamicStoreSetNotificationKeys(store, keys, NULL);
-    CFRelease(keys);
+    CFArrayRef nkeys = CFArrayCreate(kCFAllocatorDefault, key, 1, NULL);
+    SCDynamicStoreSetNotificationKeys(store, nkeys, NULL);
+    CFRelease(nkeys);
 
     queue = dispatch_queue_create("com.apple.hdb-od.ntlm-name", NULL);
     if (queue == NULL) {
@@ -2110,12 +2192,9 @@ hdb_od_create(krb5_context context, HDB ** db, const char *arg)
 	 * Pull out KerberosLocalKDC configuration
 	 */
 
-	localRef = nodeCreateWithName(d);
-	if (localRef == NULL) {
-	    ret = ENOMEM;
-	    krb5_set_error_message(context, ENOMEM, "malloc: out of memory");
+	ret = nodeCreateWithName(context, d, &localRef);
+	if (ret)
 	    goto out;
-	}
 
 	kdcConfRef = ODNodeCopyRecord(localRef, kODRecordTypeConfiguration,
 				      CFSTR("KerberosKDC"),
@@ -2141,8 +2220,8 @@ hdb_od_create(krb5_context context, HDB ** db, const char *arg)
 	}
 	d->LKDCRealm = rk_cfstring2cstring((CFStringRef)CFArrayGetValueAtIndex(data, 0));
 	if (d->LKDCRealm == NULL) {
-	    ret = ENOMEM;
-	    krb5_set_error_message(context, ENOMEM, "malloc: out of memory");
+	    ret = HDB_ERR_NOENTRY;
+	    krb5_set_error_message(context, ret, "failed to find realm");
 	    goto out;
 	}
 
@@ -2152,7 +2231,7 @@ hdb_od_create(krb5_context context, HDB ** db, const char *arg)
 
 	ntlm_notification(d);
 	
-	(*db)->hdb_fetch = hod_lkdc_fetch;
+	(*db)->hdb_fetch_kvno = hod_lkdc_fetch;
 	d->locate_record = lkdc_locate_record;
 
     } else {
@@ -2172,7 +2251,7 @@ hdb_od_create(krb5_context context, HDB ** db, const char *arg)
 
 	(*db)->hdb_capability_flags |= HDB_CAP_F_HANDLE_PASSWORDS;
 	(*db)->hdb_password = hod_password;
-	(*db)->hdb_fetch = hod_server_fetch;
+	(*db)->hdb_fetch_kvno = hod_server_fetch;
 	d->locate_record = server_locate_record;
     
     }
