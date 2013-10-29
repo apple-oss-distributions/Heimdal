@@ -36,10 +36,6 @@
 #include <heimntlm.h>
 #include <heimscram.h>
 
-#ifdef __APPLE_PRIVATE__
-#include <libproc.h>
-#endif
-
 static void
 kcm_drop_default_cache(krb5_context context, kcm_client *client, char *name);
 
@@ -59,6 +55,7 @@ kcm_is_same_session(kcm_client *client, uid_t uid, pid_t session)
 	kcm_log(1, "allowed (session matching)");
 	return 1;
     }
+
 
     kcm_log(1, "denied");
     return 0;
@@ -137,6 +134,8 @@ kcm_op_gen_new(krb5_context context,
     char *name;
 
     KCM_LOG_REQUEST(context, client, opcode);
+
+    /* deprecated */
 
     name = kcm_ccache_nextid(client->pid, client->uid);
     if (name == NULL) {
@@ -814,6 +813,7 @@ kcm_op_get_initial_ticket(krb5_context context,
 	ccache->server = server;
 	ccache->password = password;
     	ccache->flags |= KCM_FLAGS_USE_PASSWORD;
+	ccache->renew_life = 3600 * 24 * 7; /* 1 week */
 
 	kcm_ccache_update_acquire_status(kcm_context, ccache, KCM_STATUS_ACQUIRE_START, 0);
 
@@ -1412,21 +1412,22 @@ kcm_unparse_digest_one(krb5_storage *inner, struct kcm_ntlm_cred *c)
 
     CHECK(ret = krb5_store_int32(inner, c->uid));
     CHECK(ret = krb5_store_int32(inner, c->session));
-    CHECK(ret = krb5_store_uint32(inner, c->refcount));
+    CHECK(ret = krb5_store_uint32(inner, (uint32_t)c->refcount));
 
     heim_dict_iterate(c->labels, ^(heim_object_t key, heim_object_t value) {
-	    const char *k = heim_string_get_utf8(key);
 	    heim_data_t d = value;
 	    krb5_data data;
-	    data.data = d->data;
-	    data.length = d->length;
+	    data.data = (void *)heim_data_get_bytes(d);
+	    data.length = heim_data_get_length(d);
 	    if (ret) return;
 	    ret = krb5_store_uint8(inner, 1);
 	    if (ret) return;
+	    char *k = heim_string_copy_utf8(key);
 	    ret = krb5_store_stringz(inner, k);
+	    free(k);
 	    if (ret) return;
 	    ret = krb5_store_data(inner, data);
-			if (ret) return;
+	    if (ret) return;
 	});
     CHECK(ret);
     CHECK(ret = krb5_store_uint8(inner, 0));
@@ -1555,7 +1556,7 @@ find_ntlm_cred(enum kcm_cred_type type, const char *user, const char *domain, kc
 
     for (c = ntlm_head; c != NULL; c = c->next)
 	if (c->type == type && (user[0] == '\0' || strcasecmp(user, c->user) == 0) && 
-	    (domain == NULL || strcasecmp(domain, c->domain) == 0) &&
+	    (domain == NULL || domain[0] == '\0' || strcasecmp(domain, c->domain) == 0) &&
 	    kcm_is_same_session(client, c->uid, c->session))
 	    return c;
 
@@ -1879,11 +1880,12 @@ kcm_unparse_challenge_all(krb5_context context, krb5_storage *sp)
 	    break;
 
 	r = kcm_unparse_wrap(sp, "ntlm-chal", 0, ^(krb5_storage *inner) {
-		krb5_error_code ret;
-		CHECK(ret = krb5_storage_write(inner, c->challenge, sizeof(c->challenge)));
-		CHECK(ret = krb5_store_int32(inner, c->ts));
-	    out:
-		return ret;
+		ssize_t sret;
+		sret = krb5_storage_write(inner, c->challenge,
+					  sizeof(c->challenge));
+		if (sret != sizeof(c->challenge))
+		    return EINVAL;
+		return  krb5_store_int32(inner, (int32_t)c->ts);
 	    });
     }
     if (r)
@@ -2203,7 +2205,7 @@ kcm_op_do_ntlm(krb5_context context,
     ret = krb5_store_uint32(response, type3.flags);
     if (ret) goto error;
 
-    heim_ntlm_unparse_flags(type2.flags, flagname, sizeof(flagname));
+    heim_ntlm_unparse_flags(type3.flags, flagname, sizeof(flagname));
 
     kcm_log(0, "ntlm %s request processed for %s\\%s flags: %s",
 	    type, domain, c->user, flagname);
@@ -2251,6 +2253,7 @@ kcm_op_get_ntlm_user_list(krb5_context context,
 {
     struct kcm_ntlm_cred *c;
     krb5_error_code ret;
+    ssize_t sret;
 
     KCM_LOG_REQUEST(context, client, opcode);
 
@@ -2269,8 +2272,8 @@ kcm_op_get_ntlm_user_list(krb5_context context,
 	ret = krb5_store_stringz(response, c->domain);
 	if (ret)
 	    goto out;
-	ret = krb5_storage_write(response, c->uuid, sizeof(c->uuid));
-	if (ret != sizeof(c->uuid)) {
+	sret = krb5_storage_write(response, c->uuid, sizeof(c->uuid));
+	if (sret != sizeof(c->uuid)) {
 	    ret = ENOMEM;
 	    goto out;
 	}
@@ -2551,6 +2554,7 @@ kcm_op_get_scram_user_list(krb5_context context,
 {
     struct kcm_ntlm_cred *c;
     krb5_error_code ret;
+    ssize_t sret;
 
     KCM_LOG_REQUEST(context, client, opcode);
 
@@ -2565,8 +2569,8 @@ kcm_op_get_scram_user_list(krb5_context context,
 	if (ret)
 	    return ret;
 
-	ret = krb5_storage_write(response, c->uuid, sizeof(c->uuid));
-	if (ret != sizeof(c->uuid)) {
+	sret = krb5_storage_write(response, c->uuid, sizeof(c->uuid));
+	if (sret != sizeof(c->uuid)) {
 	    ret = ENOMEM;
 	    return ret;
 	}
@@ -2684,8 +2688,8 @@ kcm_op_cred_label_get(krb5_context context,
 	    d = heim_dict_copy_value(c->labels, s);
 	    if (d) {
 		krb5_data data;
-		data.length = d->length;
-		data.data = d->data;
+		data.length = heim_data_get_length(d);
+		data.data = (void *)heim_data_get_bytes(d);
 
 		krb5_store_data(response, data);
 		heim_release(d);
