@@ -33,15 +33,15 @@
 #include "mech_locl.h"
 
 GSSAPI_LIB_FUNCTION OM_uint32 GSSAPI_LIB_CALL
-gss_acquire_cred_with_password(OM_uint32 *minor_status,
-			       const gss_name_t desired_name,
-			       const gss_buffer_t password,
+gss_acquire_cred_with_password(OM_uint32 * __nonnull minor_status,
+			       __nonnull const gss_name_t desired_name,
+			       __nonnull const gss_buffer_t password,
 			       OM_uint32 time_req,
-			       const gss_OID_set desired_mechs,
+			       __nullable const gss_OID_set desired_mechs,
 			       gss_cred_usage_t cred_usage,
-			       gss_cred_id_t *output_cred_handle,
-			       gss_OID_set *actual_mechs,
-			       OM_uint32 *time_rec)
+			       __nonnull gss_cred_id_t *__nullable output_cred_handle,
+			       __nullable gss_OID_set *__nullable actual_mechs,
+			       OM_uint32 * __nullable time_rec)
 {
     OM_uint32 major_status, tmp_minor;
 
@@ -60,7 +60,7 @@ gss_acquire_cred_with_password(OM_uint32 *minor_status,
 	size_t i;
 	struct _gss_cred *new_cred;
 
-	new_cred = calloc(1, sizeof(*new_cred));
+	new_cred = _gss_mg_alloc_cred();
 	if (new_cred == NULL) {
 	    *minor_status = ENOMEM;
 	    return GSS_S_FAILURE;
