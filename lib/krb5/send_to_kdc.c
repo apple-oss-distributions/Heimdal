@@ -654,13 +654,12 @@ host_connected(krb5_context context, krb5_sendto_ctx ctx, struct host *host)
 static void
 host_connect(krb5_context context, krb5_sendto_ctx ctx, struct host *host)
 {
-    krb5_krbhst_info *hi = host->hi;
     struct addrinfo *ai = host->ai;
 
     debug_host(context, 5, host, "connecting to host");
 
     if (connect(host->fd, ai->ai_addr, ai->ai_addrlen) < 0) {
-	if (errno == EINPROGRESS && (hi->proto == KRB5_KRBHST_HTTP || hi->proto == KRB5_KRBHST_TCP)) {
+	if (errno == EINPROGRESS) {
 	    debug_host(context, 5, host, "connecting to %d (in progress)", host->fd);
 	    host->state = CONNECTING;
 	} else {
@@ -1102,18 +1101,14 @@ host_create(krb5_context context,
     /*
      * Hint to kernel what direction this connection is going
      */
-    char *lhostname = strdup(host->hi->hostname);
-    char *hostname = host->hi->hostname;
-    if (lhostname) {
-	strlwr(lhostname);
-	hostname = lhostname;
+    char *hostname = strdup(host->hi->hostname);
+    if (hostname) {
+	_krb5_remove_trailing_dot(hostname);
+	_krb5_debugx(context, 5, "host_create: setting hostname %s", hostname);
+
+	(void)ne_session_set_socket_attributes(host->fd, hostname, NULL);
+	free(hostname);
     }
-
-    _krb5_debugx(context, 5, "host_create: setting hostname %s", hostname);
-
-    (void)ne_session_set_socket_attributes(host->fd, hostname, NULL);
-    if (lhostname)
-	free(lhostname);
 #endif
 
 #endif /* __APPLE__ */
