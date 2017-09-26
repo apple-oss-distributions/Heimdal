@@ -980,7 +980,7 @@ _gss_krb5_acquire_cred_ext(OM_uint32 * minor_status,
 	return GSS_S_FAILURE;
 
     if (gss_oid_equal(credential_type, GSS_C_CRED_HEIMBASE)) {
-	heim_object_t pw, cname, cert, lkdc, site;
+	heim_object_t pw, cname, cert, authContext, lkdc, site;
 	heim_dict_t dict = (heim_dict_t)credential_data;
 
 	pw = heim_dict_copy_value(dict, _gsskrb5_kGSSICPassword);
@@ -1020,11 +1020,13 @@ _gss_krb5_acquire_cred_ext(OM_uint32 * minor_status,
 
 #ifdef PKINIT
 	cert = heim_dict_copy_value(dict, _gsskrb5_kGSSICCertificate);
+	authContext = heim_dict_copy_value(dict, _gsskrb5_kGSSICAuthenticationContext);
 	if (cert) {
-	    kret = hx509_cert_init_SecFramework(context->hx509ctx, cert, &hxcert);
+	    kret = hx509_cert_init_SecFrameworkAuth(context->hx509ctx, cert, &hxcert, authContext);
 	    if (kret)
 		goto out;
 	    heim_release(cert);
+	    heim_release(authContext);
 	}
 #endif
 
@@ -1209,7 +1211,7 @@ _gss_krb5_acquire_cred_ext(OM_uint32 * minor_status,
 	    goto out;
 	}
 
-	_gss_mg_log(1, "gss-krb5: seeting source app: %s - %s uuid: "
+	_gss_mg_log(1, "gss-krb5: setting source app: %s - %s uuid: "
 		    "%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x",
 		    type, signingIdentityStr,
 		    uuid[0],uuid[1],uuid[2],uuid[3],uuid[4],uuid[5],uuid[6],uuid[7],
