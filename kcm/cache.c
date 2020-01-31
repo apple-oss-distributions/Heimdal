@@ -226,6 +226,57 @@ kcm_ccache_get_uuids(krb5_context context,
     return 0;
 }
 
+krb5_error_code
+kcm_ccache_get_client_principals(krb5_context context,
+		     kcm_client *client,
+		     kcm_operation opcode,
+		     krb5_storage *sp)
+{
+    kcm_ccache p;
+    krb5_error_code ret = 0;
+    char *name = NULL;
+    krb5_timestamp exptime;
+
+    if (!CLIENT_IS_ROOT(client))
+	return EPERM;
+
+    HEIMDAL_MUTEX_lock(&ccache_mutex);
+
+    TAILQ_FOREACH(p, &ccache_head, members) {
+	if (!p->client)
+	    break;
+
+	ret = krb5_unparse_name(context, p->client, &name);
+	if (ret || !name)
+	    break;
+
+	ret = krb5_store_string(sp, name);
+	if (ret)
+	    break;
+
+	ret = krb5_store_int32(sp, p->session);
+	if (ret)
+	    break;
+
+	if (p->creds)
+	    exptime = p->creds->cred.times.endtime;
+	else
+	    exptime = 0;
+	ret = krb5_store_int32(sp, (int32_t)exptime);
+	if (ret)
+	    break;
+
+	free(name);
+	name = NULL;
+    }
+
+    if (name)
+	free(name);
+
+    HEIMDAL_MUTEX_unlock(&ccache_mutex);
+
+    return ret;
+}
 
 krb5_error_code
 kcm_debug_ccache(krb5_context context)
@@ -1381,7 +1432,7 @@ static const char *dumpfile = "/var/db/kcm-dump.bin";
 static const char *keyfile = "/var/db/kcm-dump.uuid";
 
 static krb5_error_code
-kcm_load_key(krb5_context context)
+kcm_load_key(krb5_context context, bool force_create)
 {
     krb5_error_code ret;
     krb5_data enc;
@@ -1413,6 +1464,11 @@ kcm_load_key(krb5_context context)
 
     return 0;
  nokey:
+    if (!force_create) {
+	krb5_set_error_message(context, HEIM_ERR_BAD_MKEY, "uuid file doesn't exist and not force");
+	return HEIM_ERR_BAD_MKEY;
+    }
+
 
     ret = kcm_create_key(uuid_master);
     if (ret)
@@ -1433,7 +1489,7 @@ kcm_write_dump(krb5_context context)
     krb5_data data, enc;
     krb5_error_code ret;
     
-    ret = kcm_load_key(context);
+    ret = kcm_load_key(context, true);
     if (ret) {
 	unlink(keyfile);
 	unlink(dumpfile);
@@ -1471,7 +1527,7 @@ kcm_read_dump(krb5_context context)
     size_t len;
     void *p;
 
-    ret = kcm_load_key(context);
+    ret = kcm_load_key(context, false);
     if (ret)
 	return;
 

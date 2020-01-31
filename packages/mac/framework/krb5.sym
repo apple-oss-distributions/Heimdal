@@ -358,6 +358,7 @@ krb5_is_thread_safe
 %ifdef HAVE_KCM
 krb5_kcm_call
 krb5_kcm_storage_request
+krb5_kcm_get_principal_list
 %endif
 krb5_kerberos_enctypes
 krb5_keyblock_get_enctype
@@ -373,6 +374,8 @@ krb5_krbhst_next
 krb5_krbhst_next_as_string
 krb5_krbhst_reset
 krb5_krbhst_set_delgated_uuid
+krb5_krbhst_set_hostname
+krb5_krbhst_set_sitename
 krb5_kt_add_entry
 krb5_kt_close
 krb5_kt_compare
@@ -694,6 +697,7 @@ HeimCredDelete
 HeimCredDeleteByUUID
 HeimCredDeleteQuery
 HeimCredGetUUID
+HeimCredGetAttributes
 HeimCredGetImpersonateBundle
 HeimCredMove
 HeimCredReleaseTransient
@@ -702,12 +706,28 @@ HeimCredSetAttribute
 HeimCredSetAttributes
 HeimCredSetImpersonateBundle
 HeimCredCopyStatus
+HeimCredDoAuth
 &kHEIMTypeKerberos
+&kHEIMAttrData
 &kHEIMAttrType
+&kHEIMObjectType
 &kHEIMTypeConfiguration
 &kHEIMTypeGeneric
+&kHEIMObjectNTLM
 &kHEIMTypeNTLM
+&kHEIMAttrNTLMUsername
+&kHEIMAttrNTLMDomain
+&kHEIMAttrNTLMChannelBinding
+&kHEIMAttrNTLMChallenge
+&kHEIMAttrNTLMType1Data
+&kHEIMAttrNTLMType2Data
+&kHEIMAttrNTLMType3Data
+&kHEIMAttrNTLMClientTargetName
+&kHEIMAttrNTLMClientFlags
+&kHEIMAttrNTLMSessionKey
+&kHEIMAttrNTLMKCMFlags
 &kHEIMTypeSchema
+&kHEIMAttrUUID
 _krb5_srp_create
 _krb5_srp_create_pa
 _krb5_srp_keysize

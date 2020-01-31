@@ -9,7 +9,9 @@ for a in \
 	${SRCROOT}/lib/heimcred/heimcred.h \
 	${SRCROOT}/lib/heimcred/heimcred-const.h \
 	${SRCROOT}/lib/krb5/krb5.h \
+	${SRCROOT}/lib/krb5/krb5cf-protos.h \
 	${SRCROOT}/lib/krb5/config_plugin.h \
+	${SRCROOT}/lib/krb5/send_to_kdc_plugin.h \
 	${SRCROOT}/lib/hdb/hdb.h \
 	${SRCROOT}/lib/hdb/hdb-protos.h \
 	${SRCROOT}/lib/hx509/hx509.h \

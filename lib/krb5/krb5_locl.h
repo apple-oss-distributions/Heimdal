@@ -167,11 +167,11 @@ struct sockaddr_dl;
 #if __APPLE__
 
 #include <xpc/xpc.h>
-#if !TARGET_OS_SIMULATOR
+#if !TARGET_OS_SIMULATOR && !TARGET_OS_OSX
 #include <NEHelperClient.h>
-#include <network/private.h>
+#include <nw/private.h>
 #include <ne_session.h>
-#endif /* !TARGET_OS_SIMULATOR */
+#endif /* !TARGET_OS_SIMULATOR && !TARGET_OS_OSX */
 
 #endif /* __APPLE__ */
 
@@ -416,8 +416,10 @@ struct srv_reply {
     uint16_t priority;
     int32_t weight;
     struct _krb5_srv_query_ctx *query;
-    heim_sema_t sema;
+    heim_sema_t hostsema;
     DNSServiceRef srv_sd;
+    DNSServiceRef query_sd;
+    heim_queue_t addrinfo_queue;
     char *hostname;
     krb5_krbhst_info *hostinfo;
     struct {
