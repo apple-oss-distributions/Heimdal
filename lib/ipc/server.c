@@ -83,7 +83,7 @@ set_timer(void)
     dispatch_source_set_timer(timer,
 			      dispatch_time(DISPATCH_TIME_NOW,
 					    timeoutvalue * NSEC_PER_SEC),
-			      timeoutvalue * NSEC_PER_SEC, 1000000);
+			      DISPATCH_TIME_FOREVER, 1000000);
 }
 
 static void
@@ -99,6 +99,22 @@ init_globals(void)
 	eventq = dispatch_queue_create("heim-ipc.event-queue", NULL);
 	dispatch_suspend(eventq);
     });
+}
+
+void
+heim_ipc_init_globals(void)
+{
+    init_globals();
+}
+
+void heim_ipc_resume_events(void)
+{
+    dispatch_resume(eventq);
+}
+
+void heim_ipc_suspend_events(void)
+{
+    dispatch_suspend(eventq);
 }
 
 void
@@ -235,7 +251,7 @@ mheim_do_call(mach_port_t server_port,
 
     audit_token_to_au32(client_creds, NULL, &uid, &gid, NULL, NULL, &pid, &session, NULL);
 
-    kr = _heim_ipc_create_cred(uid, gid, pid, session, &s->cred);
+    kr = _heim_ipc_create_cred_with_audit_token(uid, gid, pid, session, client_creds, &s->cred);
     if (kr) {
 	free(s);
 	return kr;
@@ -286,7 +302,7 @@ mheim_do_call_request(mach_port_t server_port,
 
     audit_token_to_au32(client_creds, NULL, &uid, &gid, NULL, NULL, &pid, &session, NULL);
 
-    kr = _heim_ipc_create_cred(uid, gid, pid, session, &s->cred);
+    kr = _heim_ipc_create_cred_with_audit_token(uid, gid, pid, session, client_creds, &s->cred);
     if (kr) {
 	free(s);
 	return kr;

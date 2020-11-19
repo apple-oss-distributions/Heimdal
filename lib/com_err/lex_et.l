@@ -42,7 +42,7 @@
 
 #include "compile_et.h"
 #include "parse.h"
-#include "lex.h"
+#include "lex_et.h"
 
 static unsigned lineno = 1;
 static int getstring(void);

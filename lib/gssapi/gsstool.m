@@ -3,7 +3,7 @@
  * (Royal Institute of Technology, Stockholm, Sweden).
  * All rights reserved.
  *
- * Portions Copyright (c) 2009 - 2010 Apple Inc. All rights reserved.
+ * Portions Copyright (c) 2009 - 2010, 2020 Apple Inc. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -33,6 +33,7 @@
  * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+#import <Foundation/Foundation.h>
 #include <config.h>
 
 #include <stdio.h>
@@ -189,6 +190,12 @@ acquire_credential(struct acquire_credential_options *opt, int argc, char **argv
     CFStringRef pw;
     CFErrorRef error = NULL;
 
+    CFMutableDictionaryRef sourceAppDictionary;
+       
+       sourceAppDictionary = CFDictionaryCreateMutable(kCFAllocatorDefault, 0,
+       &kCFTypeDictionaryKeyCallBacks,
+       &kCFTypeDictionaryValueCallBacks);
+    
     /*
      * mech
      */
@@ -286,6 +293,29 @@ acquire_credential(struct acquire_credential_options *opt, int argc, char **argv
 	CFRelease(hn);
     }
 
+    if (opt->source_app_identifier_string) {
+	CFStringRef sai = CFStringCreateWithCString(NULL, opt->source_app_identifier_string, kCFStringEncodingUTF8);
+	if (sai == NULL)
+	    errx(1, "CFStringCreateWithCString");
+	
+	CFDictionarySetValue(sourceAppDictionary, kGSSICAppleSourceAppSigningIdentity, sai);
+	CFRelease(sai);
+    }
+    
+    if (opt->source_app_audit_token_string) {
+	
+	NSData *tokenData = [NSData dataWithContentsOfFile:[NSString stringWithCString:opt->source_app_audit_token_string encoding:NSUTF8StringEncoding]];
+	
+	CFDictionarySetValue(sourceAppDictionary, kGSSICAppleSourceAppAuditToken, (__bridge const void *)(tokenData));
+
+    }
+    
+    if (opt->source_app_identifier_string || opt->source_app_audit_token_string) {
+    
+	CFDictionarySetValue(attributes, kGSSICAppleSourceApp, sourceAppDictionary);
+	
+    }
+    
     maj_stat = gss_aapl_initial_cred(name,
 				     mech,
 				     attributes,
@@ -521,6 +551,16 @@ destroy(struct destroy_options *opt, int argc, char **argv)
 
     if (opt->all_flag) {
 	gss_iter_creds_f(&junk, 0, mech, NULL, destroy_cred);
+    } else if (opt->uuid_string) {
+	CFStringRef uuidString = CFStringCreateWithCString(NULL, opt->uuid_string, kCFStringEncodingUTF8);
+	CFUUIDRef uuid = CFUUIDCreateFromString(NULL, uuidString);
+	CFRelease(uuidString);
+	if (uuid) {
+	    HeimCredDeleteByUUID(uuid);
+	    CFRelease(uuid);
+	} else {
+	    errx(1, "invalid uuid: %s", opt->uuid_string);
+	}
     } else {
 	gss_cred_id_t cred;
 
@@ -784,19 +824,49 @@ int
 credentials_status(struct credentials_status_options *opt, int argc, char **argv)
 {
 #ifdef __APPLE__
-    CFDictionaryRef status = HeimCredCopyStatus(NULL);
-    if (status) {
-	CFDataRef data = CFPropertyListCreateData(NULL, status, kCFPropertyListXMLFormat_v1_0, 0, NULL);
-	CFRelease(status);
-	if (data == NULL)
+    @autoreleasepool {
+	NSDictionary *status = CFBridgingRelease(HeimCredCopyStatus(NULL));
+	if (status) {
+	    NSError *error;
+	    NSData *plist = [NSPropertyListSerialization dataWithPropertyList:status format:NSPropertyListXMLFormat_v1_0 options:0 error:&error];
+	    if (!plist && error!=nil) {
+		printf("error converting to plist: %s", [[error localizedDescription] UTF8String]);
+	    }
+	    NSFileHandle *stdout = [NSFileHandle fileHandleWithStandardOutput];
+	    [stdout writeData:plist];
+	} else {
+	    printf("no credentials to dump\n");
 	    return 1;
-	printf("%.*s\n", (int)CFDataGetLength(data), CFDataGetBytePtr(data));
-	CFRelease(data);
-    } else {
-	printf("no credentials to dump\n");
-	return 1;
+	}
     }
 #endif
+    return 0;
+}
+
+int delete_all(void* opt, int argc, char **argv) {
+    CFErrorRef error = NULL;
+    CFStringRef altDsid = NULL;
+    char *dsid = NULL;
+    if (argc == 1) {
+	dsid = argv[0];
+	altDsid = CFStringCreateWithCString(NULL, dsid, kCFStringEncodingUTF8);
+    }
+    if (altDsid && !HeimCredDeleteAll(altDsid, &error)) {
+	char *msg = NULL;
+	if (error) {
+	    CFStringRef m;
+	    m = CFErrorCopyDescription(error);
+	    if (m) {
+		msg = rk_cfstring2cstring(m);
+		CFRelease(m);
+	    }
+	}
+	CFRelease(altDsid);
+	errx(1, "error deleting all for dsid: %s: %s", dsid ? dsid : "", msg ? msg : "");
+    }
+    if (altDsid) {
+	CFRelease(altDsid);
+    }
     return 0;
 }
 

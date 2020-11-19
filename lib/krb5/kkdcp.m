@@ -34,8 +34,7 @@
  */
 
 #include "krb5_locl.h"
-#include <CoreFoundation/CoreFoundation.h>
-#include <CFNetwork/CFNetwork.h>
+#include <Foundation/Foundation.h>
 
 static krb5_error_code
 requestToURL(krb5_context context,
@@ -43,74 +42,54 @@ requestToURL(krb5_context context,
 	     const krb5_data *outdata,
 	     krb5_data *retdata)
 {
-    CFMutableDataRef responseBytes = NULL;
-    CFReadStreamRef requestStream = NULL;
-    CFHTTPMessageRef message = NULL;
-    CFDataRef bodyData = NULL;
     KDC_PROXY_MESSAGE msg;
-    CFIndex numBytesRead;
-    krb5_error_code ret;
-    CFURLRef url = NULL;
+    __block krb5_error_code ret;
     size_t size;
     
-    bodyData = CFDataCreateWithBytesNoCopy(NULL, outdata->data, outdata->length, kCFAllocatorNull);
-    if (bodyData == NULL) {
-	ret = ENOMEM;
-	goto out;
-    }
- 
-    url = CFURLCreateWithBytes(NULL, (const UInt8 *)stringurl, strlen(stringurl), kCFStringEncodingUTF8, NULL);
-    if (url == NULL) {
-	ret = ENOMEM;
-	goto out;
-    }
-
-    message = CFHTTPMessageCreateRequest(kCFAllocatorDefault, CFSTR("POST"), url, kCFHTTPVersion1_1);
-    if (message == NULL) {
-	ret = ENOMEM;
-	goto out;
-    }
-    CFHTTPMessageSetBody(message, bodyData);
-    CFHTTPMessageSetHeaderFieldValue(message, CFSTR("Content-Type"), CFSTR("application/octet-stream"));
-    CFHTTPMessageSetHeaderFieldValue(message, CFSTR("X-Kerberos-Client"), CFSTR(PACKAGE_STRING));
-
-    requestStream = CFReadStreamCreateForHTTPRequest(NULL, message);
-    if (requestStream == NULL) {
-	ret = ENOMEM;
-	goto out;
-    }
-
-    if (!CFReadStreamOpen(requestStream)) {
-	CFErrorRef error = CFReadStreamCopyError(requestStream);
-	ret = HEIM_ERR_EOF;
-	_krb5_set_cf_error_message(context, ret, error, "Failed to open kkdcp stream");
-	if (error)
-	    CFRelease(error);
-	goto out;
-    }
-
-    responseBytes = CFDataCreateMutable(NULL, 0);
-    do {
-	UInt8 buf[1024];
-	numBytesRead = CFReadStreamRead(requestStream, buf, sizeof(buf));
-	if(numBytesRead > 0)
-	    CFDataAppendBytes(responseBytes, buf, numBytesRead);
-
-    } while(numBytesRead > 0);
-    if (numBytesRead < 0) {
-	CFErrorRef error = CFReadStreamCopyError(requestStream);
-	ret = HEIM_ERR_EOF;
-	_krb5_set_cf_error_message(context, ret, error, "Failed to reading kkdcp stream");
-	if (error)
-	    CFRelease(error);
-	goto out;
-    }
-    CFReadStreamClose(requestStream);
-
-    ret = decode_KDC_PROXY_MESSAGE(CFDataGetBytePtr(responseBytes), CFDataGetLength(responseBytes), &msg, &size);
-    if (ret) {
-	krb5_set_error_message(context, ret, "failed to decode KDC_PROXY_MESSAGE");
-	goto out;
+    @autoreleasepool {
+	__block NSData *responseBytes = nil;
+	NSMutableURLRequest *request = nil;
+	NSURLSessionDataTask *task = nil;
+	
+	NSString *urlString = [NSString stringWithUTF8String:stringurl];
+	_krb5_debugx(context, 5, "kkdcp request to url: %s", [urlString UTF8String]);
+	
+	NSURL *url = [NSURL URLWithString:urlString];
+	if (url==nil)
+	{
+	    ret = ENOMEM;
+	    goto out;
+	}
+	NSData *bodyData = [[NSData alloc] initWithBytesNoCopy:outdata->data length:outdata->length];
+		
+	request = [NSMutableURLRequest requestWithURL:url];
+	[request setHTTPMethod:@"POST"];
+	[request setHTTPBody:bodyData];
+	[request addValue:@"application/octet-stream" forHTTPHeaderField:@"Content-Type"];
+	[request addValue:@(PACKAGE_STRING) forHTTPHeaderField:@"X-Kerberos-Client"];
+	
+	dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+	NSURLSession *session = [NSURLSession sessionWithConfiguration:NSURLSessionConfiguration.ephemeralSessionConfiguration];
+	task = [session dataTaskWithRequest:request completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
+		if (error) {
+		_krb5_debugx(context, 5, "kkdcp response error: %s", [[error localizedDescription] UTF8String]);
+		ret = HEIM_ERR_EOF;
+		_krb5_set_cf_error_message(context, ret, (__bridge CFErrorRef) error, "Failure during kkdcp stream");
+		}
+		if (data) {
+		responseBytes = [data copy];
+		_krb5_debugx(context, 5, "kkdcp response received: %lu", (unsigned long)data.length);
+		}
+		dispatch_semaphore_signal(sem);
+		}];
+	[task resume];
+	dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+	
+	ret = decode_KDC_PROXY_MESSAGE(responseBytes.bytes, responseBytes.length, &msg, &size);
+	if (ret) {
+	    krb5_set_error_message(context, ret, "failed to decode KDC_PROXY_MESSAGE");
+	    goto out;
+	}
     }
     
     ret = krb5_data_copy(retdata, msg.kerb_message.data, msg.kerb_message.length);
@@ -122,17 +101,6 @@ requestToURL(krb5_context context,
  out:
     if (ret)
 	_krb5_debug(context, 10, ret, "kkdcp to url (%s) failed", stringurl);
-
-    if (bodyData)
-	CFRelease(bodyData);
-    if (url)
-	CFRelease(url);
-    if (message)
-	CFRelease(message);
-    if (requestStream)
-	CFRelease(requestStream);
-    if (responseBytes)
-	CFRelease(responseBytes);
 
     return ret;
 }
