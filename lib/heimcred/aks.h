@@ -1,9 +1,9 @@
 /*-
- * Copyright (c) 2016 Kungliga Tekniska Högskolan
+ * Copyright (c) 2013 Kungliga Tekniska Högskolan
  * (Royal Institute of Technology, Stockholm, Sweden).
  * All rights reserved.
  *
- * Portions Copyright (c) 2016 Apple Inc. All rights reserved.
+ * Portions Copyright (c) 2020 Apple Inc. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -27,30 +27,15 @@
  * SUCH DAMAGE.
  */
 
-#import <TargetConditionals.h>
+#ifndef aks_h
+#define aks_h
 
 #import <Foundation/Foundation.h>
-#import <err.h>
 
-#import "aks.h"
+NSData *
+ksDecryptData(NSData * blob);
 
+NSData *
+ksEncryptData(NSData *plainText);
 
-int
-main(int argc, char **argv)
-{
-    NSData *clear = [NSData dataWithBytes:"0123456789abcdef0123456789abcde" length:16 + 15];
-    NSData *enc = NULL, *dec = NULL;
-
-    enc = ksEncryptData(clear);
-    if (!enc)
-	errx(1, "ksEncryptData");
-
-    dec = ksDecryptData(enc);
-    if (!dec)
-	errx(1, "ksDecryptData");
-
-    if (![dec isEqualToData:clear])
-	errx(1, "decrypted not same");
-
-    return 0;
-}
+#endif /* aks_h */
