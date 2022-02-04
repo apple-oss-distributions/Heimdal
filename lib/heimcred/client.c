@@ -614,7 +614,9 @@ HeimCredDeleteByUUID(CFUUIDRef uuid)
     xpc_object_t reply = SendItemCommand("delete", uuid);
     if (reply)
 	xpc_release(reply);
-    CFDictionaryRemoveValue(HeimCredCTX.items, uuid);
+    dispatch_sync(HeimCredCTX.queue, ^{
+	CFDictionaryRemoveValue(HeimCredCTX.items, uuid);
+    });
 }
 /*
  *
@@ -678,9 +680,16 @@ HeimCredMove(CFUUIDRef from, CFUUIDRef to)
     UpdateImpersonateBundle(request);
 
     xpc_object_t reply = xpc_connection_send_message_with_reply_sync(HeimCredCTX.conn, request);
+
+    bool result = true;
+
+    if (xpc_dictionary_get_value(reply, "error") != NULL) {
+	result = false;
+    }
+
     xpc_release(request);
     xpc_release(reply);
-    return true;
+    return result;
 }
 
 CFDictionaryRef
@@ -828,8 +837,11 @@ HeimCredDeleteAll(CFStringRef altDSID, CFErrorRef *error)
 void
 _HeimCredResetLocalCache(void)
 {
-    CFRELEASE_NULL(HeimCredCTX.items);
-    HeimCredCTX.items = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    HC_INIT();
+    dispatch_sync(HeimCredCTX.queue, ^{
+	CFRELEASE_NULL(HeimCredCTX.items);
+	HeimCredCTX.items = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    });
 }
 
 /*

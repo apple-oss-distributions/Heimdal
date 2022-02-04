@@ -40,14 +40,24 @@
 #import <launch_priv.h>
 #import <bsm/libbsm.h>
 #import <bsm/audit.h>
+#import <bsm/audit_kevents.h>
 #import <bsm/audit_session.h>
 #include <sandbox.h>
+
+#include <dirhelper_priv.h>
+#include <sysexits.h>
+#include <sys/errno.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <stdlib.h>
+#include <pwd.h>
 
 #import <os/log.h>
 #import <os/log_private.h>
 #import <os/transaction_private.h>
 
 #import "common.h"
+#import "aks.h"
 #import "heimbase.h"
 #import "gsscred.h"
 #import "ManagedAppManager.h"
@@ -57,6 +67,8 @@
 #import "GSSCredHelper.h"
 #import "GSSCredHelperClient.h"
 #import "GSSCredXPCHelperClient.h"
+
+#include <CoreFoundation/CFXPCBridge.h>
 
 #define _PATH_KCM_CONF	    SYSCONFDIR "/kcm.conf"
 
@@ -234,6 +246,27 @@ static void executeOnRunQueue(dispatch_block_t block)
     dispatch_async(runQueue, block);
 }
 
+static void debugTrace(os_log_t logger, xpc_object_t event, uid_t sessionID, NSString *source, NSString *message) {
+    NSDictionary *dictionary = CFBridgingRelease(_CFXPCCreateCFObjectFromXPCObject(event));
+    NSMutableDictionary *objectDictionary = [dictionary mutableCopy];
+    NSDictionary *attributes = objectDictionary[@"attributes"];
+    if (attributes) {
+	objectDictionary[@"attributes"] = nil;
+	CFErrorRef error = NULL;
+	CFStringRef mechName = GetValidatedValue((__bridge CFDictionaryRef)(attributes), kHEIMAttrType, CFStringGetTypeID(), &error);
+	if (mechName) {
+	    struct HeimMech *mech = (struct HeimMech *)CFDictionaryGetValue(HeimCredCTX.mechanisms, mechName);
+	    if (mech) {
+		objectDictionary[@"attributes"] = CFBridgingRelease(mech->traceCallback((__bridge CFDictionaryRef)attributes));
+	    }
+	} else {
+	    objectDictionary[@"attributes"] = CFBridgingRelease(DefaultTraceCallback((__bridge CFDictionaryRef)attributes));
+	}
+    }
+
+    os_log_debug(logger, "%@: %d, %@, %@", message, sessionID, source, objectDictionary);
+}
+
 static void GSSCred_peer_event_handler(struct peer *peer, xpc_object_t event)
 {
     dispatch_assert_queue(runQueue);
@@ -247,7 +280,7 @@ static void GSSCred_peer_event_handler(struct peer *peer, xpc_object_t event)
 	}
 	
 	assert(type == XPC_TYPE_DICTIONARY);
-	
+
 	/*
 	 * Check if we are impersonating a different bundle
 	 */
@@ -260,7 +293,16 @@ static void GSSCred_peer_event_handler(struct peer *peer, xpc_object_t event)
 		    peer->bundleID = CFRetain(bundle);
 		    peer->needsManagedAppCheck = true;
 		    peer->isManagedApp = false;
-		    os_log_debug(GSSOSLog(), "impersonating app: %s", CFStringGetCStringPtr(peer->bundleID, kCFStringEncodingUTF8));
+#if TARGET_OS_OSX
+		    size_t tokenLength;
+		    const void *data = xpc_dictionary_get_data(event, "impersonate_token", &tokenLength);
+		    if (tokenLength >= sizeof(audit_token_t)) {
+			audit_token_t impersonate_token = { 0 };
+			memcpy(&impersonate_token, data, sizeof(audit_token_t));
+			peer->auditToken = impersonate_token;
+		    }
+#endif
+		    os_log_debug(GSSOSLog(), "impersonating app: %s, %d", CFStringGetCStringPtr(peer->bundleID, kCFStringEncodingUTF8), (int)audit_token_to_pid(peer->auditToken));
 		} else {
 		    xpc_connection_cancel(peer->peer);
 		    CFRELEASE_NULL(bundle);
@@ -271,20 +313,11 @@ static void GSSCred_peer_event_handler(struct peer *peer, xpc_object_t event)
 		CFRELEASE_NULL(bundle);
 	    }
 	}
-	//the bundle id above should be used along with audit token for impersonation.  The code below is to prevent a client from assigning only the audittoken and have it be accepted.
-#if TARGET_OS_OSX
-	size_t tokenLength;
-	const void *data = xpc_dictionary_get_data(event, "impersonate_token", &tokenLength);
-	if (tokenLength >= sizeof(audit_token_t)) {
-	    audit_token_t impersonate_token = { 0 };
-	    memcpy(&impersonate_token, data, sizeof(audit_token_t));
-	    if (!HeimCredGlobalCTX.hasEntitlement(peer, "com.apple.private.accounts.bundleidspoofing")) {
-		xpc_connection_cancel(peer->peer);
-		return;
-	    }
-	    
-	}
-#endif
+
+	//debug trace printing
+	NSString *source = [NSString stringWithFormat:@"%@ (%@)", peer->callingAppBundleID, peer->bundleID];
+	debugTrace(GSSOSLog(), event, peer->session->session, source, @"Request received");
+
 	const char *cmd = xpc_dictionary_get_string(event, "command");
 	if (cmd == NULL) {
 	    os_log_error(GSSOSLog(), "peer sent invalid no command");
@@ -333,6 +366,7 @@ static void GSSCred_peer_event_handler(struct peer *peer, xpc_object_t event)
 	}
 	
 	if (reply) {
+	    debugTrace(GSSOSLog(), reply, peer->session->session, source, @"Reply to be sent");
 	    xpc_connection_send_message(peer->peer, reply);
 	}
 	
@@ -362,7 +396,10 @@ static void GSSCredHelper_peer_event_handler(GSSHelperPeer *peer, xpc_object_t e
 	}
 	
 	assert(type == XPC_TYPE_DICTIONARY);
-	
+
+	//debug trace printing
+	debugTrace(GSSHelperOSLog(), event, peer.session, peer.bundleIdentifier, @"Request received");
+
 	const char *cmd = xpc_dictionary_get_string(event, "command");
 	if (cmd == NULL) {
 	    os_log_error(GSSHelperOSLog(), "peer sent invalid no command");
@@ -378,6 +415,7 @@ static void GSSCredHelper_peer_event_handler(GSSHelperPeer *peer, xpc_object_t e
 	}
 
 	if (reply) {
+	    debugTrace(GSSHelperOSLog(), reply, peer.session, peer.bundleIdentifier, @"Reply to be sent");
 	    xpc_connection_send_message(peer.conn, reply);
 	}
     }
@@ -442,6 +480,7 @@ static void GSSCred_event_handler(xpc_connection_t peerconn)
 	heim_assert(peer != NULL, "out of memory");
 	
 	peer->peer = peerconn;
+	xpc_connection_get_audit_token(peerconn, &peer->auditToken);
 	peer->bundleID = CopySigningIdentitier(peerconn);
 	if (peer->bundleID == NULL) {
 	    char path[MAXPATHLEN];
@@ -449,7 +488,7 @@ static void GSSCred_event_handler(xpc_connection_t peerconn)
 	    if (proc_pidpath(getpid(), path, sizeof(path)) <= 0)
 		path[0] = '\0';
 	    
-	    os_log_error(GSSOSLog(), "client[pid-%d] \"%s\" is not signed", (int)xpc_connection_get_pid(peerconn), path);
+	    os_log_error(GSSOSLog(), "client[pid-%d] \"%s\" is not signed", (int)audit_token_to_pid(peer->auditToken), path);
 #if (TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR)
 	    free(peer);
 	    xpc_connection_cancel(peerconn);
@@ -460,14 +499,15 @@ static void GSSCred_event_handler(xpc_connection_t peerconn)
 #endif
 	}
 	peer->callingAppBundleID = CFRetain(peer->bundleID);
-	os_log_debug(GSSOSLog(), "new connection from %@",  peer->callingAppBundleID);
 	if (HeimCredGlobalCTX.useUidMatching) {
 	    peer->session = HeimCredCopySession(-1);
 	} else {
 	    peer->session = HeimCredCopySession(HeimCredGlobalCTX.getAsid(peerconn));
 	}
 	heim_assert(peer->session != NULL, "out of memory");
-	
+
+	os_log_debug(GSSOSLog(), "new connection from %@, asid: %d",  peer->callingAppBundleID, peer->session->session);
+
 	peer->needsManagedAppCheck = true;
 	peer->isManagedApp = false;
 	peer->access_status = IAKERB_NOT_CHECKED;
@@ -674,6 +714,71 @@ SessionMonitor(void)
 /*
  *
  */
+#if TARGET_OS_OSX
+static void
+enterSandbox(void)
+{
+	char buf[PATH_MAX] = "";
+
+	char *home_env = getenv("HOME");
+	if (home_env == NULL) {
+		os_log_debug(OS_LOG_DEFAULT, "$HOME not set, falling back to using getpwuid");
+		struct passwd *pwd = getpwuid(getuid());
+		if (pwd == NULL) {
+			os_log_error(OS_LOG_DEFAULT, "failed to get passwd entry for uid %u", getuid());
+			exit(EXIT_FAILURE);
+		}
+		home_env = pwd->pw_dir;
+	}
+
+	char *home = realpath(home_env, NULL);
+	if (home == NULL) {
+		os_log_error(OS_LOG_DEFAULT, "failed to resolve user's home directory: %{darwin.errno}d", errno);
+		exit(EXIT_FAILURE);
+	}
+
+	if (!_set_user_dir_suffix("com.apple.GSSCred") ||
+	    confstr(_CS_DARWIN_USER_TEMP_DIR, buf, sizeof(buf)) == 0) {
+		os_log_error(OS_LOG_DEFAULT, "failed to initialize temporary directory: %{darwin.errno}d", errno);
+		exit(EXIT_FAILURE);
+	}
+
+	char *tempdir = realpath(buf, NULL);
+	if (tempdir == NULL) {
+		os_log_error(OS_LOG_DEFAULT, "failed to resolve temporary directory: %{darwin.errno}d", errno);
+		exit(EXIT_FAILURE);
+	}
+
+	if (confstr(_CS_DARWIN_USER_CACHE_DIR, buf, sizeof(buf)) == 0) {
+		os_log_error(OS_LOG_DEFAULT, "failed to initialize cache directory: %{darwin.errno}d", errno);
+		exit(EXIT_FAILURE);
+	}
+
+	char *cachedir = realpath(buf, NULL);
+	if (cachedir == NULL) {
+		os_log_error(OS_LOG_DEFAULT, "failed to resolve cache directory: %{darwin.errno}d", errno);
+		exit(EXIT_FAILURE);
+	}
+
+	const char *parameters[] = {
+		"HOME", home,
+		"TMPDIR", tempdir,
+		"DARWIN_CACHE_DIR", cachedir,
+		NULL
+	};
+
+	char *sberror = NULL;
+	// Note: The name of the sandbox profile here does not include the '.sb' extension.
+	if (sandbox_init_with_parameters("com.apple.GSSCred", SANDBOX_NAMED, parameters, &sberror) != 0) {
+		os_log_error(OS_LOG_DEFAULT, "Failed to enter sandbox: %{public}s", sberror);
+		exit(EXIT_FAILURE);
+	}
+
+	free(home);
+	free(tempdir);
+	free(cachedir);
+}
+#endif
 
 int main(int argc, const char *argv[])
 {
@@ -682,13 +787,12 @@ int main(int argc, const char *argv[])
     
     os_log_set_client_type(OS_LOG_CLIENT_TYPE_LOGD_DEPENDENCY, 0);
 
+    umask(S_IRWXG | S_IRWXO);
+
 #if TARGET_OS_OSX
-    char *sberr = NULL;
-    if (sandbox_init("com.apple.GSSCred", SANDBOX_NAMED, &sberr) < 0) {
-	os_log_error(GSSOSLog(), "sandbox_init %s failed: %s", "com.apple.GSSCred", sberr);
-	sandbox_free_error(sberr);
-	exit (EXIT_FAILURE);
-    }
+    enterSandbox();
+#else
+    _set_user_dir_suffix("com.apple.GSSCred");
 #endif
     
     @autoreleasepool {

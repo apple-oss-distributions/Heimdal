@@ -3,7 +3,7 @@
  * (Royal Institute of Technology, Stockholm, Sweden).
  * All rights reserved.
  *
- * Portions Copyright (c) 2013 Apple Inc. All rights reserved.
+ * Portions Copyright (c) 2020 Apple Inc. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -27,39 +27,15 @@
  * SUCH DAMAGE.
  */
 
-#import <TargetConditionals.h>
-
 #import <Foundation/Foundation.h>
-#import <CoreFoundation/CoreFoundation.h>
-#import <CoreFoundation/CFRuntime.h>
+#import <os/log.h>
 
-#import "heimcred.h"
-#import "heimbase.h"
-#import "common.h"
-#import "gsscred.h"
-/*
- *
- */
+NS_ASSUME_NONNULL_BEGIN
 
-void
-_HeimCredRegisterKerberos(void)
-{
-    CFMutableSetRef set = CFSetCreateMutable(NULL, 0, &kCFTypeSetCallBacks);
-    CFMutableDictionaryRef schema;
+@interface gssoslog : NSObject
 
-    schema = _HeimCredCreateBaseSchema(kHEIMObjectKerberos);
+os_log_t GSSOSLog(void);
 
-    CFDictionarySetValue(schema, kHEIMAttrTransient, CFSTR("b"));
-    CFDictionarySetValue(schema, kHEIMAttrStatus, CFSTR("n"));
-    CFDictionarySetValue(schema, kHEIMAttrAuthTime, CFSTR("t"));
-    CFDictionarySetValue(schema, kHEIMAttrExpire, CFSTR("t"));
-    CFDictionarySetValue(schema, kHEIMAttrRenewTill, CFSTR("t"));
-    CFDictionarySetValue(schema, kHEIMAttrKerberosTicketGrantingTicket, CFSTR("b"));
+@end
 
-    CFSetAddValue(set, schema);
-    CFRELEASE_NULL(schema);
-
-
-    _HeimCredRegisterMech(kHEIMTypeKerberos, set, KerberosStatusCallback, NULL, HeimCredGlobalCTX.notifyCaches, DefaultTraceCallback, false, NULL);
-    CFRELEASE_NULL(set);
-}
+NS_ASSUME_NONNULL_END

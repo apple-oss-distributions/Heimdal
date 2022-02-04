@@ -27,16 +27,18 @@
  * SUCH DAMAGE.
  */
 
+#import "aks.h"
 #import <Foundation/Foundation.h>
 #import <Security/Security.h>
 #import <Security/SecRandom.h>
 #import <CommonCrypto/CommonCryptor.h>
 #import <CommonCrypto/CommonCryptorSPI.h>
 #import <TargetConditionals.h>
-#import <syslog.h>
+#import "gssoslog.h"
+#import "heimbase.h"
+#import <os/transaction_private.h>
 
-#define PLATFORM_SUPPORT_CLASS_F (TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR)
-
+#define PLATFORM_SUPPORT_CLASS_F !TARGET_OS_SIMULATOR
 
 #import <AssertMacros.h>
 #if PLATFORM_SUPPORT_CLASS_F
@@ -46,29 +48,14 @@
 #import "common.h"
 #import "roken.h"
 
-
-#if PLATFORM_SUPPORT_CLASS_F
-
-static keybag_handle_t
-get_keybag(void)
-{
-    static keybag_handle_t handle;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        kern_return_t kr = aks_get_system(device_keybag_handle, &handle);
-	if (kr != KERN_SUCCESS)
-	    abort();
-    });
-    return handle;
-}
-#endif
-
-
 /*
  * stored as [32:wrapped_key_len][wrapped_key_len:wrapped_key][iv:ivSize][variable:ctdata][16:tag]
  */
 
 static const size_t ivSize = 16;
+#if PLATFORM_SUPPORT_CLASS_F
+static os_transaction_t keyNotReadyTransaction = NULL;
+#endif
 
 NSData *
 ksEncryptData(NSData *plainText)
@@ -83,15 +70,17 @@ ksEncryptData(NSData *plainText)
     uint32_t key_wrapped_size;
     CCCryptorStatus ccerr;
 
-    if (![plainText isKindOfClass:[NSData class]]) abort();
+    heim_assert([plainText isKindOfClass:[NSData class]], "input is not NSData");
     
     size_t ctLen = [plainText length];
     size_t tagLen = 16;
 
-    if (SecRandomCopyBytes(kSecRandomDefault, bulkKeySize, bulkKey))
+    if (SecRandomCopyBytes(kSecRandomDefault, bulkKeySize, bulkKey)) {
 	abort();
-    if (SecRandomCopyBytes(kSecRandomDefault, ivSize, iv))
+    }
+    if (SecRandomCopyBytes(kSecRandomDefault, ivSize, iv)) {
 	abort();
+    }
 
     int bulkKeyWrappedSize;
 #if PLATFORM_SUPPORT_CLASS_F
@@ -99,11 +88,24 @@ ksEncryptData(NSData *plainText)
 
     bulkKeyWrappedSize = sizeof(bulkKeyWrapped);
 
-    error = aks_wrap_key(bulkKey, sizeof(bulkKey), key_class_f, get_keybag(), bulkKeyWrapped, &bulkKeyWrappedSize, NULL);
-    if (error)
+    error = aks_wrap_key(bulkKey, sizeof(bulkKey), key_class_f, bad_keybag_handle, bulkKeyWrapped, &bulkKeyWrappedSize, NULL);
+    if (error) {
+	os_log_error(GSSOSLog(), "Error with wrap key: %d", error);
+	//if not ready, keep in memory until next time, else crash
+	if (error == kAKSReturnNotReady) {
+	    //start a transaction
+	    keyNotReadyTransaction = os_transaction_create("com.apple.Heimdal.GSSCred.keyNotReady");
+	    return NULL;
+	}
 	abort();
-    if ((unsigned long)bulkKeyWrappedSize > sizeof(bulkKeyWrapped))
+    }
+    //complete the transaction, if present
+    if (keyNotReadyTransaction) {
+	keyNotReadyTransaction = NULL;
+    }
+    if ((unsigned long)bulkKeyWrappedSize > sizeof(bulkKeyWrapped)) {
 	abort();
+    }
 
 #else
     bulkKeyWrappedSize = bulkKeySize;
@@ -114,8 +116,9 @@ ksEncryptData(NSData *plainText)
     size_t blobLen = sizeof(key_wrapped_size) + key_wrapped_size + ivSize + ctLen + tagLen;
     
     blob = [[NSMutableData alloc] initWithLength:blobLen];
-    if (blob == NULL)
+    if (blob == NULL) {
 	return NULL;
+    }
 
     UInt8 *cursor = [blob mutableBytes];
 
@@ -183,9 +186,11 @@ ksDecryptData(NSData * blob)
     int keySize = sizeof(bulkKey);
 #if PLATFORM_SUPPORT_CLASS_F
 
-    error = aks_unwrap_key(cursor, wrapped_key_size, key_class_f, get_keybag(), bulkKey, &keySize);
-    if (error != KERN_SUCCESS)
+    error = aks_unwrap_key(cursor, wrapped_key_size, key_class_f, bad_keybag_handle, bulkKey, &keySize);
+    if (error != KERN_SUCCESS) {
+	os_log_error(GSSOSLog(), "Error with unwrap key: %d", error);
 	goto out;
+    }
 #else
     if (bulkKeySize != wrapped_key_size) {
 	error = EINVAL;
@@ -240,7 +245,7 @@ ksDecryptData(NSData * blob)
     /* check that tag stored after the plaintext is correct */
     cursor += ctLen;
     if (ct_memcmp(tag, cursor, tagLen) != 0) {
-	syslog(LOG_ERR, "incorrect tag on credential data");
+	os_log_error(GSSOSLog(), "incorrect tag on credential data");
 	goto out;
     }
 

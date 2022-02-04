@@ -49,6 +49,7 @@ NS_ASSUME_NONNULL_BEGIN
 #pragma mark create
 
 + (BOOL)createCredentialAndCache:(struct peer * _Nullable)peer name:(NSString*)clientName returningCacheUuid:(CFUUIDRef _Nonnull *_Nonnull)uuid;
++ (BOOL)createCredentialAndCache:(struct peer * _Nullable)peer name:(NSString*)clientName returningCacheUuid:(CFUUIDRef *)cacheUUID credentialUUID:(CFUUIDRef *)credUUID;
 + (BOOL)createCredentialAndCache:(struct peer * _Nullable)peer name:(NSString*)clientName returningCredentialDictionary:(CFDictionaryRef _Nonnull *_Nonnull)dict;
 
 + (BOOL)createCredential:(struct peer * _Nullable)peer name:(NSString*)clientName attributes:(CFDictionaryRef  _Nullable)attributes returningUuid:(CFUUIDRef _Nonnull *_Nonnull) uuid;
@@ -60,12 +61,17 @@ NS_ASSUME_NONNULL_BEGIN
 + (BOOL)createNTLMCredential:(struct peer * _Nullable)peer attributes:(CFDictionaryRef _Nullable)attributes returningDictionary:(CFDictionaryRef _Nullable *_Nonnull)dict;
 
 #pragma mark -
+#pragma mark move
+
++ (BOOL)move:(struct peer * _Nullable)peer from:(CFUUIDRef)from to:(CFUUIDRef)to;
+
+#pragma mark -
 #pragma mark fetch
 
 + (BOOL)fetchCredential:(struct peer * _Nullable)peer uuid:(CFUUIDRef)uuid;
 + (BOOL)fetchCredential:(struct peer * _Nullable)peer uuid:(CFUUIDRef) uuid returningDictionary:(CFDictionaryRef _Nonnull *_Nonnull)dict;
 + (CFUUIDRef _Nullable)getDefaultCredential:(struct peer * _Nullable)peer CF_RETURNS_RETAINED;
-+ (BOOL)fetchDefaultCredential:(struct peer *)peer returningName:(NSString * __autoreleasing *)name;
++ (BOOL)fetchDefaultCredential:(struct peer * _Nullable)peer returningName:(CFStringRef * _Nonnull)name;
 
 #pragma mark -
 #pragma mark query
@@ -87,6 +93,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 + (int64_t)delete:(struct peer * _Nullable)peer uuid:(CFUUIDRef)uuid;
 + (int64_t)deleteAll:(struct peer * _Nullable)peer dsid:(NSString *)dsid;
++ (BOOL)deleteCacheContents:(struct peer * _Nullable)peer parentUUID:(CFUUIDRef)parentUUID;
 
 #pragma mark -
 #pragma mark hold
