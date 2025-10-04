@@ -188,7 +188,7 @@ get_cred_kdc(krb5_context context,
 	    pid = audit_token_to_pid(auditToken);
 	}
 #endif
-	if (delegate_bundle) {
+	if (delegate_bundle && (context->flags & KRB5_CONTEXT_FLAG_FORK_SAFE) == 0) {
 	    //ONLY set the delegate identifier when it doesn't match the current process.
 	    CFBundleRef appBundle = CFBundleGetMainBundle();
 	    if (appBundle) {
@@ -1281,7 +1281,7 @@ krb5_get_creds(krb5_context context,
 	char *princ;
 	ret = krb5_unparse_name(context, inprinc, &princ);
 	if (ret == 0) {
-	    _krb5_debugx(context, 5, "krb5_get_creds: %s: opt: %d", princ, opt ? opt->options : 0);
+	    _krb5_debugx(context, 5, "krb5_get_creds: %s: opt: %u", princ, opt ? opt->options : 0);
 	    krb5_xfree(princ);
 	}
     }
